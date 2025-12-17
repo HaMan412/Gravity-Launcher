@@ -984,6 +984,8 @@ router.post('/config/:id', async (req, res) => {
             }
 
             fs.writeFileSync(serverConfigPath, serverContent, 'utf8');
+            console.log(`[DEBUG] Wrote port ${port} to ${serverConfigPath}`);
+            console.log(`[DEBUG] Content:\n${serverContent}`);
 
             // Sync port to data.json for Launcher reference
             instance.port = port;
