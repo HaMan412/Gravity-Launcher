@@ -784,6 +784,52 @@ router.post('/import', async (req, res) => {
     saveData(data);
 
     broadcastStatus(newId, 'stopped');
+
+    // Auto-run pnpm install to ensure dependencies are compatible
+    broadcastLog(newId, `[SYSTEM] 正在安装依赖...`);
+    try {
+        const isWin = process.platform === 'win32';
+        const pnpmCmd = isWin ? 'pnpm.cmd' : 'pnpm';
+
+        // Prepare environment with bundled tools
+        const binDir = path.resolve(__dirname, '../../bin');
+        const env = { ...process.env, CI: 'true' };
+        const nodeBin = path.join(binDir, 'node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
+
+        if (isWin) {
+            let pathKey = 'PATH';
+            for (const key in env) {
+                if (key.toUpperCase() === 'PATH') {
+                    pathKey = key;
+                    break;
+                }
+            }
+            env[pathKey] = `${nodeBin};${env[pathKey] || ''}`;
+        }
+
+        const child = spawn(pnpmCmd, ['install', '--no-frozen-lockfile'], {
+            cwd: importPath,
+            env,
+            shell: true
+        });
+
+        child.stdout.on('data', (data) => {
+            broadcastLog(newId, data.toString());
+        });
+        child.stderr.on('data', (data) => {
+            broadcastLog(newId, data.toString());
+        });
+        child.on('close', (code) => {
+            if (code === 0) {
+                broadcastLog(newId, `[SYSTEM] 依赖安装完成！`);
+            } else {
+                broadcastLog(newId, `[WARN] 依赖安装失败 (code: ${code})，请手动运行 pnpm install`);
+            }
+        });
+    } catch (e) {
+        broadcastLog(newId, `[WARN] 无法自动安装依赖: ${e.message}`);
+    }
+
     res.json({ success: true, instance: newInstance });
 });
 
