@@ -11,7 +11,23 @@
     "customUrls": {},
     "selectedMirror": "china"
   },
-  "instances": [],
+  "instances": [
+    {
+      "id": "1765965270570",
+      "name": "1",
+      "path": "F:\\BOT TEST\\Yunzai",
+      "port": "2536",
+      "created": 1765965270570,
+      "isImported": true,
+      "redis": {
+        "mode": "shared",
+        "port": 6379
+      },
+      "config": {
+        "masterQQ": ""
+      }
+    }
+  ],
   "settings": {
     "redisKeepAlive": false,
     "proxy": null,
