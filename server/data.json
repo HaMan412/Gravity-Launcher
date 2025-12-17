@@ -1,0 +1,23 @@
+{
+  "dependencies": {
+    "nodePath": null,
+    "redisPath": null,
+    "nodeVersion": null,
+    "redisVersion": null,
+    "useGlobal": {
+      "nodejs": false,
+      "git": false
+    },
+    "customUrls": {},
+    "selectedMirror": "china"
+  },
+  "instances": [],
+  "settings": {
+    "redisKeepAlive": false,
+    "proxy": null,
+    "backgroundImage": "/background.png?t=1765877719533",
+    "backgroundOpacity": 0,
+    "backgroundImagePath": "F:\\BOT TEST\\Launcher\\public\\Launcher\\server\\public\\background.png",
+    "pluginDownloadMirror": "https://ghfast.top/"
+  }
+}

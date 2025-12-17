@@ -1,0 +1,94 @@
+{
+  "name": "gravity-launcher",
+  "version": "1.0.0",
+  "description": "Gravity - Yunzai Portable Launcher",
+  "main": "electron/main.js",
+  "author": "Gravity",
+  "license": "MIT",
+  "scripts": {
+    "start": "concurrently \"npm run start:server\" \"npm run start:client\"",
+    "start:server": "cd server && node index.js",
+    "start:client": "cd client && npm run dev",
+    "install:all": "npm install && cd client && npm install && cd ../server && npm install",
+    "build:client": "cd client && npm run build",
+    "electron": "electron .",
+    "electron:dev": "concurrently \"npm run start:server\" \"npm run start:client\" \"wait-on http://localhost:5173 && electron .\"",
+    "dist": "npm run build:client && electron-builder",
+    "dist:portable": "npm run build:client && electron-builder --win portable",
+    "dist:installer": "npm run build:client && electron-builder --win nsis"
+  },
+  "keywords": [
+    "yunzai",
+    "launcher",
+    "electron"
+  ],
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "png-to-ico": "^3.0.1",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.gravity.launcher",
+    "productName": "Gravity",
+    "directories": {
+      "output": "dist",
+      "buildResources": "."
+    },
+    "files": [
+      "electron/**/*",
+      "client/dist/**/*",
+      "icon.png",
+      "!**/node_modules/**",
+      "!**/temp/**",
+      "!**/team/**",
+      "!**/*.log",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "server",
+        "to": "server",
+        "filter": [
+          "**/*",
+          "!node_modules/**"
+        ]
+      },
+      {
+        "from": "node_modules",
+        "to": "server/node_modules",
+        "filter": [
+          "**/*",
+          "!**/.cache/**",
+          "!**/typescript/**",
+          "!**/@types/**",
+          "!**/vite/**",
+          "!**/electron/**",
+          "!**/electron-builder/**",
+          "!**/esbuild/**",
+          "!**/7zip-bin/**"
+        ]
+      },
+      {
+        "from": "bin",
+        "to": "bin"
+      }
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "icon.png",
+      "sign": null
+    },
+    "portable": {
+      "artifactName": "Gravity-Portable-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "icon.png",
+      "uninstallerIcon": "icon.png",
+      "artifactName": "Gravity-Setup-${version}.exe"
+    }
+  }
+}
