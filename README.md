@@ -4,11 +4,12 @@
 由谷歌反重力强力辅助
 
 ### 引用
+云崽：[Trss-Yunzai](https://github.com/TimeRainStarSky/Yunzai)
 插件索引：[Yunzai-Bot-plugins-index](https://github.com/yhArcadia/Yunzai-Bot-plugins-index)
 
-## 📅 未来计划 (Todo)
+## Todo
 
-- [ ] 支持 **GSUID** (GenshinUID)
+- [ ] 支持 **GSUID**
 - [ ] 支持 **NoneBot**
 - [ ] 支持 **AstrBot**
 - [ ] 支持 **Erdanus**
