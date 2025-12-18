@@ -82,4 +82,8 @@ function broadcastStatus(instanceId, status) {
     broadcast({ type: 'STATUS', instanceId, status });
 }
 
-module.exports = { init, broadcastLog, broadcastGlobalLog, broadcastStatus, registerConnectionHandler, broadcast };
+function getWss() {
+    return wss;
+}
+
+module.exports = { init, broadcastLog, broadcastGlobalLog, broadcastStatus, registerConnectionHandler, broadcast, getWss };

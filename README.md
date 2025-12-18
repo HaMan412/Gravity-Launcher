@@ -9,7 +9,8 @@
 
 ## Todo
 
-- [ ] 支持 **GSUID**
+- [x] 支持 **Trss-Yunzai**
+- [x] 支持 **GSUID**
 - [ ] 支持 **NoneBot**
 - [ ] 支持 **AstrBot**
 - [ ] 支持 **Erdanus**

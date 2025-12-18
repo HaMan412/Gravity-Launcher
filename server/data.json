@@ -11,29 +11,18 @@
     "customUrls": {},
     "selectedMirror": "china"
   },
-  "instances": [
-    {
-      "id": "1765965270570",
-      "name": "1",
-      "path": "F:\\BOT TEST\\Yunzai",
-      "port": "2536",
-      "created": 1765965270570,
-      "isImported": true,
-      "redis": {
-        "mode": "shared",
-        "port": 6379
-      },
-      "config": {
-        "masterQQ": ""
-      }
-    }
-  ],
+  "instances": [],
   "settings": {
     "redisKeepAlive": false,
-    "proxy": null,
-    "backgroundImage": "/background.png?t=1765877719533",
+    "proxy": {
+      "protocol": "http",
+      "host": "127.0.0.1",
+      "port": "7897",
+      "username": "",
+      "password": ""
+    },
+    "backgroundImage": "/background.png?t=1765592272692",
     "backgroundOpacity": 0,
-    "backgroundImagePath": "F:\\BOT TEST\\Launcher\\public\\Launcher\\server\\public\\background.png",
-    "pluginDownloadMirror": "https://ghfast.top/"
+    "backgroundImagePath": "F:\\BOT TEST\\Launcher\\server\\public\\background.png"
   }
 }

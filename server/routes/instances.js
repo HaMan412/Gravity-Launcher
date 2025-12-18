@@ -12,16 +12,35 @@ const BIN_DIR = path.resolve(__dirname, '../../bin');
 
 // In-memory process store
 const runningProcesses = {}; // { instanceId: ChildProcess }
+const terminalProcesses = {}; // { instanceId: ChildProcess } - embedded terminal shells
+const terminalLogs = {}; // { instanceId: string[] } - terminal output history
 const logHistory = {}; // { instanceId: string[] }
 
 // Register handler to send log history to new clients
 registerConnectionHandler((ws) => {
+    // Send instance log history
     Object.keys(logHistory).forEach(id => {
         logHistory[id].forEach(msg => {
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'LOG', instanceId: id, data: msg }));
             }
         });
+    });
+
+    // Send terminal log history and open status
+    Object.keys(terminalLogs).forEach(id => {
+        // Send terminal logs
+        terminalLogs[id].forEach(msg => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'TERMINAL_OUTPUT', instanceId: id, data: msg }));
+            }
+        });
+        // Send terminal open status if terminal is running
+        if (terminalProcesses[id]) {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'TERMINAL_OPENED', instanceId: id }));
+            }
+        }
     });
 });
 
@@ -60,6 +79,7 @@ router.get('/', (req, res) => {
     const data = loadData();
     const instancesWithStatus = data.instances.map(inst => ({
         ...inst,
+        type: inst.type || 'yunzai',
         status: runningProcesses[inst.id] ? 'running' : 'stopped'
     }));
     res.json(instancesWithStatus);
@@ -101,6 +121,10 @@ router.post('/start/:id', async (req, res) => {
     }
     if (fs.existsSync(pythonBinDir)) {
         pathParts.push(pythonBinDir);
+    }
+    const uvBinDir = path.join(BIN_DIR, 'uv-x86_64-pc-windows-msvc');
+    if (fs.existsSync(uvBinDir)) {
+        pathParts.push(uvBinDir);
     }
 
     // Handle Windows case-insensitive Path/PATH key
@@ -154,16 +178,38 @@ router.post('/start/:id', async (req, res) => {
     broadcastLog(id, `--- Starting Instance ${instance.name} ---`);
     broadcastLog(id, `Working Directory: ${instance.path}`);
 
-    // Spawn node process using the same Node.js that's running this server
-    // process.execPath is the proven working Node.js binary
-    console.log(`Using Node.js: ${process.execPath}`);
-    broadcastLog(id, `Using Node: ${process.execPath}`);
+    // Determine start command based on instance type
+    let child;
+    const instanceType = instance.type || 'yunzai';
 
-    const appPath = path.join(instance.path, 'app.js');
-    const child = spawn(process.execPath, [appPath], {
-        cwd: instance.path,
-        env
-    });
+    if (instanceType === 'gsuid') {
+        // GSUID Core uses: uv run core
+        console.log(`Starting GSUID Core with: uv run core`);
+        broadcastLog(id, `Starting GSUID Core...`);
+
+        // Add UTF-8 encoding environment variables to fix Windows console encoding issues
+        const gsuidEnv = {
+            ...env,
+            PYTHONUTF8: '1',                    // Force Python to use UTF-8 encoding
+            PYTHONIOENCODING: 'utf-8'           // Set IO encoding to UTF-8
+        };
+
+        child = spawn('uv', ['run', 'core'], {
+            cwd: instance.path,
+            env: gsuidEnv,
+            shell: true
+        });
+    } else {
+        // Yunzai-Bot uses: node app.js
+        console.log(`Using Node.js: ${process.execPath}`);
+        broadcastLog(id, `Using Node: ${process.execPath}`);
+
+        const appPath = path.join(instance.path, 'app.js');
+        child = spawn(process.execPath, [appPath], {
+            cwd: instance.path,
+            env
+        });
+    }
 
     runningProcesses[id] = child;
     let hasStarted = false;
@@ -269,6 +315,71 @@ router.post('/stop/:id', (req, res) => {
     res.json({ message: 'Stop signal sent' });
 });
 
+// Send Command to Instance
+router.post('/command/:id', (req, res) => {
+    const { id } = req.params;
+    const { command } = req.body;
+    const child = runningProcesses[id];
+
+    // If instance is running, send to stdin
+    if (child) {
+        if (!child.stdin || child.stdin.destroyed) {
+            return res.status(400).json({ error: 'Instance stdin unavailable' });
+        }
+
+        try {
+            broadcastLog(id, `> ${command}`);
+            child.stdin.write(command + '\n');
+            return res.json({ success: true, mode: 'interactive' });
+        } catch (error) {
+            console.error(`Failed to send command to instance ${id}:`, error);
+            return res.status(500).json({ error: error.message });
+        }
+    }
+
+    // If instance is NOT running, execute as system command in instance directory
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === id);
+
+    if (!instance) {
+        return res.status(404).json({ error: 'Instance not found' });
+    }
+
+    try {
+        broadcastLog(id, `[OFFLINE] > ${command}`);
+
+        // Spawn temporary process using PowerShell directly for better compatibility
+        const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command];
+
+        const tempChild = spawn('powershell', args, {
+            cwd: instance.path,
+            env: { ...process.env, FORCE_COLOR: '1' }
+        });
+
+        tempChild.stdout.on('data', (data) => {
+            // Convert buffer to string, simple conversion for now
+            const output = data.toString();
+            broadcastLog(id, output);
+        });
+
+        tempChild.stderr.on('data', (data) => {
+            const output = data.toString();
+            broadcastLog(id, output);
+        });
+
+        tempChild.on('error', (err) => {
+            broadcastLog(id, `[EXEC ERR] Process start failed: ${err.message}`);
+        });
+
+        // We don't track this process in runningProcesses as it's short-lived/maintenance
+        res.json({ success: true, mode: 'offline' });
+
+    } catch (error) {
+        console.error(`Failed to execute offline command for instance ${id}:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get Logs
 router.get('/logs/:id', (req, res) => {
     const { id } = req.params;
@@ -305,6 +416,7 @@ const runStep = (command, args, cwd, res) => {
         const gitBin = path.join(BIN_DIR, 'PortableGit', 'cmd');
         const nodeBin = path.join(BIN_DIR, 'node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
         const pythonBin = path.join(BIN_DIR, 'python-3.12.8-embed-amd64');
+        const uvBin = path.join(BIN_DIR, 'uv-x86_64-pc-windows-msvc');
 
         // Prepend to PATH
         if (isWin) {
@@ -316,9 +428,12 @@ const runStep = (command, args, cwd, res) => {
                 }
             }
             const currentPath = env[pathKey] || '';
-            env[pathKey] = `${gitBin};${nodeBin};${pythonBin};${currentPath}`;
+            // Only add if they exist
+            const parts = [gitBin, nodeBin, pythonBin, uvBin].filter(p => fs.existsSync(p));
+            env[pathKey] = `${parts.join(';')};${currentPath}`;
         } else {
-            env.PATH = `${gitBin}:${nodeBin}:${pythonBin}:${env.PATH}`;
+            const parts = [gitBin, nodeBin, pythonBin, uvBin].filter(p => fs.existsSync(p));
+            env.PATH = `${parts.join(':')}:${env.PATH}`;
         }
 
         const proc = spawn(cmd, args, { cwd, shell: true, env });
@@ -440,13 +555,13 @@ router.get('/checkName/:name', (req, res) => {
 
 
 router.post('/create', async (req, res) => {
-    const { name, port } = req.body;
+    const { name, port, type, gsuidRepoSource } = req.body;
     const instanceName = name || 'Yunzai-Bot';
     const instancePort = port || '2536';
+    const instanceType = type || 'yunzai';
+    const gsuidRepo = gsuidRepoSource || 'gitee'; // default to gitee
 
     // === Validate instance name format ===
-    // Only allow ASCII letters, digits, hyphens, and underscores
-    // Chinese characters in paths cause Node.js spawn to crash (error 3221226505)
     const validNamePattern = /^[a-zA-Z0-9_-]+$/;
     if (!validNamePattern.test(instanceName)) {
         broadcastGlobalLog(`[ERR] Invalid instance name: "${instanceName}". Only English letters, numbers, hyphens and underscores allowed.`);
@@ -457,113 +572,216 @@ router.post('/create', async (req, res) => {
 
     const installPath = path.join(process.cwd(), 'instances', instanceName);
 
-    // === Pre-flight checks for required dependencies ===
-    const nodeBinDir = path.join(BIN_DIR, 'node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
-    const gitBinDir = path.join(BIN_DIR, 'PortableGit', 'cmd');
-    const nodeExe = path.join(nodeBinDir, 'node.exe');
-    const gitExe = path.join(gitBinDir, 'git.exe');
+    // === Pre-flight checks ===
+    if (instanceType === 'yunzai') {
+        const nodeBinDir = path.join(BIN_DIR, 'node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
+        const nodeExe = path.join(nodeBinDir, 'node.exe');
+        const hasPortableNode = fs.existsSync(nodeExe);
+        const hasSystemNode = require('child_process').spawnSync('node', ['--version'], { shell: true }).status === 0;
 
-    // Check Node.js - Portable first, then system
-    const hasPortableNode = fs.existsSync(nodeExe);
-    const hasSystemNode = require('child_process').spawnSync('node', ['--version'], { shell: true }).status === 0;
-    if (!hasPortableNode && !hasSystemNode) {
-        broadcastGlobalLog(`[ERR] Node.js not found. Please install it in Environment settings or install Node.js globally.`);
-        return res.status(400).json({ error: '未检测到 Node.js，请在「环境管理」中安装，或全局安装 Node.js' });
+        if (!hasPortableNode && !hasSystemNode) {
+            broadcastGlobalLog(`[ERR] Node.js not found.`);
+            return res.status(400).json({ error: '未检测到 Node.js，请先安装' });
+        }
+    } else if (instanceType === 'gsuid') {
+        // Check for UV
+        // We can check 'uv --version' system-wide or portable
+        // For portable, it's typically in Python Scripts or dedicated folder
+        // For now, assume if they selected GSUID, they might have installed UV via our tool
+        // Ideally we should verify 'uv' command works
+        try {
+            // Check system UV or assume path?
+            // We'll check via spawn, but do not block strict for now if we can't find it easily? 
+            // Better to block to prevent failure.
+            // Using 'where uv' or 'uv --version'
+            const uvCheck = require('child_process').spawnSync('uv', ['--version'], { shell: true });
+            if (uvCheck.status !== 0) {
+                broadcastGlobalLog(`[ERR] 'uv' command not found. Please install UV in Environment Management.`);
+                return res.status(400).json({ error: '未检测到 uv 命令，请在环境管理中安装 UV' });
+            }
+        } catch (e) {
+            // ignore
+        }
     }
 
-    // Check Git - Portable first, then system
+    const gitBinDir = path.join(BIN_DIR, 'PortableGit', 'cmd');
+    const gitExe = path.join(gitBinDir, 'git.exe');
     const hasPortableGit = fs.existsSync(gitExe);
     const hasSystemGit = require('child_process').spawnSync('git', ['--version'], { shell: true }).status === 0;
+
     if (!hasPortableGit && !hasSystemGit) {
-        broadcastGlobalLog(`[ERR] Git not found. Please install it in Environment settings or install Git globally.`);
-        return res.status(400).json({ error: '未检测到 Git，请在「环境管理」中安装，或全局安装 Git' });
+        broadcastGlobalLog(`[ERR] Git not found.`);
+        return res.status(400).json({ error: '未检测到 Git，请先安装' });
     }
     // === End Pre-flight checks ===
 
-    // Validate before creation
+    // Validate unique name
     let currentData = { instances: [] };
     if (fs.existsSync(DATA_FILE)) {
         currentData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     }
 
-    // Check name uniqueness
-    const nameExists = currentData.instances?.some(i => i.name === instanceName);
-    if (nameExists) {
-        return res.status(400).json({ error: `实例名称 "${instanceName}" 已存在，请使用其他名称` });
+    if (currentData.instances?.some(i => i.name === instanceName)) {
+        return res.status(400).json({ error: `实例名称 "${instanceName}" 已存在` });
     }
 
-    // Check port uniqueness (using getInstancePort to check config files too)
+    // Check port usage (generic)
     for (const inst of currentData.instances || []) {
-        const instPort = getInstancePort(inst);
-        if (String(instPort) === String(instancePort)) {
+        if (String(inst.port) === String(instancePort)) {
             return res.status(400).json({ error: `端口 ${instancePort} 已被实例 "${inst.name}" 使用` });
         }
     }
 
     if (fs.existsSync(installPath)) {
-        return res.status(400).json({ error: 'Instance path already exists' });
+        return res.status(400).json({ error: 'Directory already exists' });
     }
-
-    // Allocate LLOneBot Port - Removed
-    // const llonebotPort = allocLLOneBotPort(currentData.instances || []);
 
     res.json({ message: 'Creation started' });
 
     try {
         fs.mkdirSync(path.dirname(installPath), { recursive: true });
 
-        // 1. Git Clone
-        await runStep('git', ['clone', '--depth', '1', 'https://gitee.com/TimeRainStarSky/Yunzai', `"${installPath}"`], process.cwd());
+        if (instanceType === 'yunzai') {
+            // 1. Git Clone
+            await runStep('git', ['clone', '--depth', '1', 'https://gitee.com/TimeRainStarSky/Yunzai', `"${installPath}"`], process.cwd());
+            // 2. Install PNPM
+            await runStep('npm', ['i', '-g', 'pnpm'], installPath);
+            // 3. PNPM Install
+            await runStep('pnpm', ['i'], installPath);
 
-        // 2. Install PNPM
-        await runStep('npm', ['i', '-g', 'pnpm'], installPath);
+            // 4. Configure Port
+            broadcastGlobalLog(`[SYSTEM] Configuring instance port: ${instancePort}`);
+            const configDir = path.join(installPath, 'config', 'config');
+            const serverYamlPath = path.join(configDir, 'server.yaml');
+            if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
 
-        // 3. PNPM Install
-        await runStep('pnpm', ['i'], installPath);
-
-        // 4. Update Yunzai config with specified port
-        broadcastGlobalLog(`[SYSTEM] Configuring instance port: ${instancePort}`);
-        const configDir = path.join(installPath, 'config', 'config');
-        const serverYamlPath = path.join(configDir, 'server.yaml');
-
-        // Ensure config directory exists
-        if (!fs.existsSync(configDir)) {
-            fs.mkdirSync(configDir, { recursive: true });
-        }
-
-        // Create or update server.yaml with the specified port
-        let serverConfig = `# Server Configuration\nport: ${instancePort}\nhost: "0.0.0.0"\n`;
-        if (fs.existsSync(serverYamlPath)) {
-            // If file exists, update the port line
-            let content = fs.readFileSync(serverYamlPath, 'utf8');
-            if (content.includes('port:')) {
-                content = content.replace(/port:\s*\d+/, `port: ${instancePort}`);
-            } else {
-                content = `port: ${instancePort}\n` + content;
+            let serverConfig = `# Server Configuration\nport: ${instancePort}\nhost: "0.0.0.0"\n`;
+            if (fs.existsSync(serverYamlPath)) {
+                let content = fs.readFileSync(serverYamlPath, 'utf8');
+                if (content.includes('port:')) {
+                    content = content.replace(/port:\s*\d+/, `port: ${instancePort}`);
+                } else {
+                    content = `port: ${instancePort}\n` + content;
+                }
+                serverConfig = content;
             }
-            serverConfig = content;
-        }
-        fs.writeFileSync(serverYamlPath, serverConfig);
-        broadcastGlobalLog(`[SYSTEM] Port configured: ${instancePort}`);
+            fs.writeFileSync(serverYamlPath, serverConfig);
+            broadcastGlobalLog(`[SYSTEM] Port configured: ${instancePort}`);
 
-        // 5. Register Instance
+
+        } else if (instanceType === 'gsuid') {
+            // GSUID Steps
+            // Read selected mirror from config
+            let selectedMirror = 'official'; // default
+            try {
+                if (fs.existsSync(DATA_FILE)) {
+                    const configData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+                    selectedMirror = configData.dependencies?.selectedMirror || 'official';
+                    gsuidRepo = configData.dependencies?.gsuidRepo || 'github';
+                }
+            } catch (e) {
+                broadcastGlobalLog(`[WARN] Failed to read mirror config, using official source`);
+            }
+
+            // 1. Git Clone (with repository source selection)
+            let gsuidRepoUrl;
+
+            if (gsuidRepo === 'gitee') {
+                // Use Gitee mirror (fast for China)
+                gsuidRepoUrl = 'https://gitee.com/hamann/gsuid_core_gitee.git';
+                broadcastGlobalLog(`[SYSTEM] Using Gitee mirror (hamann/gsuid_core_gitee)`);
+            } else {
+                //  Use GitHub official (with mirror support if selected)
+                if (selectedMirror === 'china') {
+                    gsuidRepoUrl = 'https://ghproxy.net/https://github.com/Genshin-bots/gsuid_core.git';
+                } else if (selectedMirror === 'ghproxy') {
+                    gsuidRepoUrl = 'https://mirror.ghproxy.com/https://github.com/Genshin-bots/gsuid_core.git';
+                } else if (selectedMirror === 'fastgit') {
+                    gsuidRepoUrl = 'https://download.fastgit.org/Genshin-bots/gsuid_core.git';
+                } else {
+                    gsuidRepoUrl = 'https://github.com/Genshin-bots/gsuid_core.git';
+                }
+                broadcastGlobalLog(`[SYSTEM] Using GitHub official (Genshin-bots/gsuid_core)`);
+            }
+
+            broadcastGlobalLog(`[SYSTEM] Cloning GSUID Core from: ${gsuidRepoUrl}`);
+
+            // Disable SSL verification for git clone to avoid certificate issues
+            try {
+                await runStep('git', ['config', '--global', 'http.sslVerify', 'false'], process.cwd());
+                broadcastGlobalLog(`[SYSTEM] Temporarily disabled SSL verification`);
+            } catch (e) {
+                broadcastGlobalLog(`[WARN] Failed to disable SSL verification: ${e}`);
+            }
+
+            try {
+                await runStep('git', ['clone', '--depth', '1', gsuidRepoUrl, `"${installPath}"`], process.cwd());
+            } finally {
+                // Re-enable SSL verification after clone
+                try {
+                    await runStep('git', ['config', '--global', 'http.sslVerify', 'true'], process.cwd());
+                    broadcastGlobalLog(`[SYSTEM] Re-enabled SSL verification`);
+                } catch (e) {
+                    broadcastGlobalLog(`[WARN] Failed to re-enable SSL verification: ${e}`);
+                }
+            }
+
+
+            // 2. UV Sync and Install Python Package Manager
+            broadcastGlobalLog(`[SYSTEM] Installing GSUID dependencies...`);
+            await runStep('uv', ['sync'], installPath);
+            broadcastGlobalLog(`[SYSTEM] Ensuring pip is installed...`);
+            await runStep('uv', ['run', 'python', '-m', 'ensurepip'], installPath);
+
+
+            // 3. Configure Port (GSUID uses gsuid_core/data/config.json)
+            broadcastGlobalLog(`[SYSTEM] Configuring GSUID port: ${instancePort}`);
+            const gsuidDataDir = path.join(installPath, 'data');
+            const configJsonPath = path.join(gsuidDataDir, 'config.json');
+
+            if (!fs.existsSync(gsuidDataDir)) {
+                fs.mkdirSync(gsuidDataDir, { recursive: true });
+            }
+
+            let configJson = {
+                HOST: '0.0.0.0',
+                PORT: parseInt(instancePort)
+            };
+
+            // If config.json already exists, merge with existing settings
+            if (fs.existsSync(configJsonPath)) {
+                try {
+                    const existingConfig = JSON.parse(fs.readFileSync(configJsonPath, 'utf8'));
+                    configJson = { ...existingConfig, HOST: '0.0.0.0', PORT: parseInt(instancePort) };
+                } catch (e) {
+                    broadcastGlobalLog(`[WARN] Failed to parse existing config.json, creating new one.`);
+                }
+            }
+
+            fs.writeFileSync(configJsonPath, JSON.stringify(configJson, null, 2));
+            broadcastGlobalLog(`[SYSTEM] GSUID port configured: ${instancePort}`);
+        }
+
+        // Register Instance
         const newInstance = {
             id: Date.now().toString(),
             name: instanceName,
             path: installPath,
             port: instancePort,
             redis: { mode: 'shared', port: 6379 },
-            created: true
+            created: true,
+            type: instanceType
         };
 
-        let currentData = { instances: [], dependencies: {} };
         if (fs.existsSync(DATA_FILE)) {
             currentData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        } else {
+            currentData = { instances: [] };
         }
         currentData.instances.push(newInstance);
         fs.writeFileSync(DATA_FILE, JSON.stringify(currentData, null, 2));
 
-        broadcastGlobalLog(`[SYSTEM] Yunzai instance created successfully!`);
+        broadcastGlobalLog(`[SYSTEM] Instance created successfully!`);
         broadcastStatus(newInstance.id, 'stopped');
 
     } catch (error) {
@@ -696,6 +914,154 @@ router.post('/opendir', (req, res) => {
     res.json({ success: true });
 });
 
+// Open Embedded Terminal for Instance
+router.post('/terminal/:id', (req, res) => {
+    const { id } = req.params;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === id);
+
+    if (!instance) {
+        return res.status(404).json({ error: 'Instance not found' });
+    }
+
+    const instancePath = instance.path;
+    if (!fs.existsSync(instancePath)) {
+        return res.status(400).json({ error: 'Instance directory not found' });
+    }
+
+    // If terminal already running, return success
+    if (terminalProcesses[id]) {
+        return res.json({ success: true, alreadyOpen: true });
+    }
+
+    const instanceName = instance.name || 'Instance';
+
+    // Initialize terminal log history
+    if (!terminalLogs[id]) terminalLogs[id] = [];
+
+    // Broadcast terminal output helper
+    const broadcastTerminalOutput = (output) => {
+        terminalLogs[id].push(output);
+        if (terminalLogs[id].length > 500) terminalLogs[id].shift();
+        // Use wsHelper broadcastGlobalLog with special format
+        const { getWss } = require('../utils/wsHelper');
+        const wss = getWss();
+        if (wss) {
+            wss.clients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({
+                        type: 'TERMINAL_OUTPUT',
+                        instanceId: id,
+                        data: output
+                    }));
+                }
+            });
+        }
+    };
+
+    // Start cmd.exe (not PowerShell, for simpler path prompt)
+    const child = spawn('cmd.exe', [], {
+        cwd: instancePath,
+        shell: false,
+        env: { ...process.env, PROMPT: '$P$G ' }
+    });
+
+    terminalProcesses[id] = child;
+
+    // Send welcome message
+    broadcastTerminalOutput(`========================================`);
+    broadcastTerminalOutput(`  Debug Terminal: ${instanceName}`);
+    broadcastTerminalOutput(`  Path: ${instancePath}`);
+    broadcastTerminalOutput(`========================================`);
+    broadcastTerminalOutput(``);
+
+    child.stdout.on('data', (data) => {
+        const lines = data.toString().split('\n');
+        lines.forEach(line => {
+            if (line.trim()) broadcastTerminalOutput(line.trimEnd());
+        });
+    });
+
+    child.stderr.on('data', (data) => {
+        const lines = data.toString().split('\n');
+        lines.forEach(line => {
+            if (line.trim()) broadcastTerminalOutput(`[ERR] ${line.trimEnd()}`);
+        });
+    });
+
+    child.on('close', (code) => {
+        broadcastTerminalOutput(`[SYSTEM] Terminal closed (exit code: ${code})`);
+        delete terminalProcesses[id];
+        // Notify frontend terminal is closed
+        const { getWss } = require('../utils/wsHelper');
+        const wss = getWss();
+        if (wss) {
+            wss.clients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({
+                        type: 'TERMINAL_CLOSED',
+                        instanceId: id
+                    }));
+                }
+            });
+        }
+    });
+
+    child.on('error', (err) => {
+        console.error('Terminal process error:', err);
+        broadcastTerminalOutput(`[ERR] Terminal error: ${err.message}`);
+        delete terminalProcesses[id];
+    });
+
+    broadcastGlobalLog(`[SYSTEM] Opened embedded terminal for: ${instanceName}`);
+    res.json({ success: true });
+});
+
+// Send command to embedded terminal
+router.post('/terminal/:id/command', (req, res) => {
+    const { id } = req.params;
+    const { command } = req.body;
+
+    const proc = terminalProcesses[id];
+    if (!proc) {
+        return res.status(400).json({ error: 'Terminal not open. Click "Open Terminal" first.' });
+    }
+
+    try {
+        // Echo command to output first
+        if (terminalLogs[id]) {
+            const { getWss } = require('../utils/wsHelper');
+            const wss = getWss();
+            if (wss) {
+                wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({
+                            type: 'TERMINAL_OUTPUT',
+                            instanceId: id,
+                            data: `> ${command}`
+                        }));
+                    }
+                });
+            }
+        }
+        proc.stdin.write(command + '\n');
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Close embedded terminal
+router.post('/terminal/:id/close', (req, res) => {
+    const { id } = req.params;
+    const proc = terminalProcesses[id];
+    if (proc) {
+        proc.kill();
+        delete terminalProcesses[id];
+    }
+    res.json({ success: true });
+});
+
 // Select Folder Dialog
 // Select Folder Dialog
 router.post('/select-folder-action', (req, res) => {
@@ -747,8 +1113,12 @@ router.post('/import', async (req, res) => {
     if (!fs.statSync(importPath).isDirectory()) {
         return res.status(400).json({ error: '路径不是文件夹' });
     }
-    if (!fs.existsSync(path.join(importPath, 'package.json'))) {
-        return res.status(400).json({ error: '该目录下没有 package.json，不是有效的云崽实例' });
+    const hasPackageJson = fs.existsSync(path.join(importPath, 'package.json'));
+    // GSUID usually has gsuid_core folder or pyproject.toml
+    const hasGsuidCore = fs.existsSync(path.join(importPath, 'gsuid_core')) || fs.existsSync(path.join(importPath, 'pyproject.toml'));
+
+    if (!hasPackageJson && !hasGsuidCore) {
+        return res.status(400).json({ error: '无效实例: 缺少 package.json (Yunzai) 或 pyproject.toml/gsuid_core (GSUID)' });
     }
 
     // Check for duplicate name
@@ -763,13 +1133,40 @@ router.post('/import', async (req, res) => {
         return res.status(400).json({ error: '该路径已导入过实例' });
     }
 
+    const instanceType = hasGsuidCore ? 'gsuid' : 'yunzai';
+
+    let instancePort = port;
+
+    // Try to read port from GSUID config if importing
+    if (instanceType === 'gsuid' && !instancePort) {
+        try {
+            const configPath = path.join(importPath, 'gsuid_core', 'data', 'config.json');
+            // Try different paths structure might vary
+            const configPath2 = path.join(importPath, 'data', 'config.json');
+
+            let gsuidConfigPath = null;
+            if (fs.existsSync(configPath)) gsuidConfigPath = configPath;
+            else if (fs.existsSync(configPath2)) gsuidConfigPath = configPath2;
+
+            if (gsuidConfigPath) {
+                const configContent = JSON.parse(fs.readFileSync(gsuidConfigPath, 'utf8'));
+                if (configContent.PORT) {
+                    instancePort = configContent.PORT.toString();
+                }
+            }
+        } catch (e) {
+            console.error('Failed to read GSUID config port:', e);
+        }
+    }
+
     const newId = Date.now().toString();
     const newInstance = {
         id: newId,
         name: name,
         path: importPath,
-        port: port || '2536',
+        port: instancePort || (instanceType === 'gsuid' ? '8080' : '2536'),
         created: Date.now(),
+        type: instanceType,
         isImported: true, // Mark as imported
         redis: {
             mode: 'shared', // Default to shared for imported? or independent? Safe to assume shared or let user config.
@@ -785,16 +1182,68 @@ router.post('/import', async (req, res) => {
 
     broadcastStatus(newId, 'stopped');
 
-    // Auto-run pnpm install to ensure dependencies are compatible
-    broadcastLog(newId, `[SYSTEM] 正在安装依赖...`);
-    try {
-        const isWin = process.platform === 'win32';
-        const pnpmCmd = isWin ? 'pnpm.cmd' : 'pnpm';
+    // Auto-run pnpm install ONLY for Yunzai
+    if (instanceType === 'yunzai') {
+        broadcastLog(newId, `[SYSTEM] 正在安装依赖...`);
+        try {
+            const isWin = process.platform === 'win32';
+            const pnpmCmd = isWin ? 'pnpm.cmd' : 'pnpm';
 
-        // Prepare environment with bundled tools
+            // Prepare environment with bundled tools
+            const binDir = path.resolve(__dirname, '../../bin');
+            const env = { ...process.env, CI: 'true' };
+            const nodeBin = path.join(binDir, 'node-v24.12.0-win-x64'); // This should be the directory containing node.exe and pnpm.cmd
+
+            if (isWin) {
+                let pathKey = 'PATH';
+                for (const key in env) {
+                    if (key.toUpperCase() === 'PATH') {
+                        pathKey = key;
+                        break;
+                    }
+                }
+                // Prepend Node.js to PATH
+                env[pathKey] = `${nodeBin};${env[pathKey]}`;
+            }
+
+            const child = spawn(pnpmCmd, ['install'], {
+                cwd: importPath,
+                env: env,
+                shell: true
+            });
+
+            child.stdout.on('data', (data) => {
+                const lines = data.toString().split('\n');
+                lines.forEach(line => {
+                    if (line.trim()) broadcastLog(newId, `[PNPM] ${line.trim()}`);
+                });
+            });
+
+            child.stderr.on('data', (data) => {
+                const lines = data.toString().split('\n');
+                lines.forEach(line => {
+                    if (line.trim()) broadcastLog(newId, `[PNPM] ${line.trim()}`);
+                });
+            });
+
+            child.on('close', (code) => {
+                if (code === 0) {
+                    broadcastLog(newId, `[SYSTEM] 依赖安装完成`);
+                } else {
+                    broadcastLog(newId, `[SYSTEM] 依赖安装失败 (Exit code: ${code})`);
+                }
+            });
+        } catch (err) {
+            broadcastLog(newId, `[ERR] 启动安装过程失败: ${err.message}`);
+        }
+    } else if (instanceType === 'gsuid') {
+        broadcastLog(newId, `[SYSTEM] 正在安装 GSUID 依赖... (uv sync)`);
+
+        const isWin = process.platform === 'win32';
         const binDir = path.resolve(__dirname, '../../bin');
         const env = { ...process.env, CI: 'true' };
-        const nodeBin = path.join(binDir, 'node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
+        // Try to find bundled UV
+        const uvBinDir = path.join(binDir, 'uv-x86_64-pc-windows-msvc');
 
         if (isWin) {
             let pathKey = 'PATH';
@@ -804,30 +1253,58 @@ router.post('/import', async (req, res) => {
                     break;
                 }
             }
-            env[pathKey] = `${nodeBin};${env[pathKey] || ''}`;
+            if (fs.existsSync(uvBinDir)) {
+                env[pathKey] = `${uvBinDir};${env[pathKey]}`;
+            }
         }
 
-        const child = spawn(pnpmCmd, ['install', '--no-frozen-lockfile'], {
+        const child = spawn('uv', ['sync'], {
             cwd: importPath,
-            env,
+            env: env,
             shell: true
         });
 
         child.stdout.on('data', (data) => {
-            broadcastLog(newId, data.toString());
+            const lines = data.toString().split('\n');
+            lines.forEach(line => {
+                if (line.trim()) broadcastLog(newId, `[UV] ${line.trim()}`);
+            });
         });
+
         child.stderr.on('data', (data) => {
-            broadcastLog(newId, data.toString());
+            const lines = data.toString().split('\n');
+            lines.forEach(line => {
+                if (line.trim()) broadcastLog(newId, `[UV] ${line.trim()}`);
+            });
         });
+
         child.on('close', (code) => {
             if (code === 0) {
-                broadcastLog(newId, `[SYSTEM] 依赖安装完成！`);
+                broadcastLog(newId, `[SYSTEM] uv sync 完成，正在检查 pip...`);
+
+                const child2 = spawn('uv', ['run', 'python', '-m', 'ensurepip'], {
+                    cwd: importPath,
+                    env: env,
+                    shell: true
+                });
+
+                child2.stdout.on('data', (data) => {
+                    const lines = data.toString().split('\n');
+                    lines.forEach(line => { if (line.trim()) broadcastLog(newId, `[PIP] ${line.trim()}`); });
+                });
+                child2.stderr.on('data', (data) => {
+                    const lines = data.toString().split('\n');
+                    lines.forEach(line => { if (line.trim()) broadcastLog(newId, `[PIP] ${line.trim()}`); });
+                });
+
+                child2.on('close', (c2) => {
+                    broadcastLog(newId, `[SYSTEM] GSUID 依赖安装流程结束 (Code: ${c2})`);
+                });
+
             } else {
-                broadcastLog(newId, `[WARN] 依赖安装失败 (code: ${code})，请手动运行 pnpm install`);
+                broadcastLog(newId, `[SYSTEM] uv sync 失败 (Exit code: ${code})`);
             }
         });
-    } catch (e) {
-        broadcastLog(newId, `[WARN] 无法自动安装依赖: ${e.message}`);
     }
 
     res.json({ success: true, instance: newInstance });
@@ -939,6 +1416,59 @@ router.post('/config/:id', async (req, res) => {
     const serverDefaultPath = path.join(instance.path, 'config', 'default_config', 'server.yaml');
     const otherConfigPath = path.join(configDir, 'other.yaml');
     const otherDefaultPath = path.join(instance.path, 'config', 'default_config', 'other.yaml');
+
+    // Handle GSUID Config
+    if (instance.type === 'gsuid') {
+        if (port) {
+            const newPort = String(port);
+            // Check conflicts
+            const conflictInst = data.instances.find(i => i.id !== id && String(getInstancePort(i)) === newPort);
+            if (conflictInst) {
+                return res.status(400).json({ error: `Port ${newPort} is used by instance "${conflictInst.name}"` });
+            }
+            if (!runningProcesses[id]) {
+                const isAvailable = await checkPortAvailable(parseInt(newPort));
+                if (!isAvailable) {
+                    return res.status(400).json({ error: `Port ${newPort} is already in use by the system` });
+                }
+            }
+
+            try {
+                // Try GSUID config paths
+                const gsuidConfigPath1 = path.join(instance.path, 'gsuid_core', 'data', 'config.json');
+                const gsuidConfigPath2 = path.join(instance.path, 'data', 'config.json');
+                let targetConfigPath = null;
+
+                if (fs.existsSync(gsuidConfigPath1)) targetConfigPath = gsuidConfigPath1;
+                else targetConfigPath = gsuidConfigPath2; // defaulting to this if neither exists, effectively creating it here
+
+                // Ensure dir exists
+                const targetDir = path.dirname(targetConfigPath);
+                if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+
+                let configContent = {};
+                if (fs.existsSync(targetConfigPath)) {
+                    configContent = JSON.parse(fs.readFileSync(targetConfigPath, 'utf8'));
+                }
+
+                configContent.PORT = parseInt(port);
+                // Also ensure HOST is set if missing
+                if (!configContent.HOST) configContent.HOST = "0.0.0.0";
+
+                fs.writeFileSync(targetConfigPath, JSON.stringify(configContent, null, 4), 'utf8');
+
+                // Update data.json
+                instance.port = port;
+                saveData(data);
+
+                return res.json({ success: true, message: 'GSUID port updated' });
+            } catch (err) {
+                console.error('Failed to update GSUID config:', err);
+                return res.status(500).json({ error: `Failed to update GSUID config: ${err.message}` });
+            }
+        }
+        return res.json({ success: true }); // Nothing to update
+    }
 
     try {
         // Ensure config/config directory exists

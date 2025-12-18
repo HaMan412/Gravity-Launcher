@@ -646,13 +646,19 @@ router.delete('/uninstall/:instanceId', (req, res) => {
 
 
 // Helper to run command and stream logs
-const BIN_DIR = path.resolve(__dirname, '../../bin');
+// Use process.cwd() to get the bin directory relative to where the server is started
+const BIN_DIR = path.join(process.cwd(), 'bin');
 
 function runCommand(command, args, cwd, instanceId, options = {}) {
     return new Promise((resolve, reject) => {
         const isWin = process.platform === 'win32';
         // Handle npm/pnpm on windows
-        const cmd = isWin && (command === 'npm' || command === 'pnpm' || command === 'yarn') ? `${command}.cmd` : command;
+        let cmd = isWin && (command === 'npm' || command === 'pnpm' || command === 'yarn') ? `${command}.cmd` : command;
+
+        // Quote command path if it contains spaces (Windows shell issue)
+        if (isWin && cmd.includes(' ') && !cmd.startsWith('"')) {
+            cmd = `"${cmd}"`;
+        }
 
         // Quote arguments with spaces for Windows shell
         const safeArgs = isWin ? args.map(arg => {
@@ -693,8 +699,33 @@ function runCommand(command, args, cwd, instanceId, options = {}) {
         child.stderr.on('data', (data) => {
             const line = stripAnsi(data.toString().trim());
             if (line) {
-                // Git sends progress to stderr, don't mark as ERR
-                if (line.startsWith('Cloning into') || line.includes('Note: checking out')) {
+                // Git and uv send progress to stderr, don't mark as ERR
+                // uv patterns: Resolved, Downloading, Downloaded, Building, Built, Prepared, Installed, Uninstalled, warning:
+                // Also match package version patterns like: package==1.0.0, +package, -package
+                const isProgressOutput =
+                    line.startsWith('Cloning into') ||
+                    line.includes('Note: checking out') ||
+                    line.startsWith('Resolved') ||
+                    line.startsWith('Downloading') ||
+                    line.startsWith('Downloaded') ||
+                    line.startsWith('Building') ||
+                    line.startsWith('Built') ||
+                    line.startsWith('Prepared') ||
+                    line.startsWith('Installed') ||
+                    line.startsWith('Uninstalled') ||
+                    line.startsWith('Audited') ||
+                    line.startsWith('Using Python') ||
+                    line.startsWith('warning:') ||
+                    line.startsWith('-') ||
+                    line.startsWith('+') ||
+                    line.includes('packages in') ||
+                    // Match package version patterns (e.g., anyio==4.0.0, certifi==2023.7.22)
+                    /^[a-zA-Z0-9_-]+==[0-9]/.test(line) ||
+                    // Match partial version lines (e.g., 1.4.0, ==4.0.0)
+                    /^[0-9]+\.[0-9]/.test(line) ||
+                    /^==[0-9]/.test(line);
+
+                if (isProgressOutput) {
                     broadcastLog(instanceId, line);
                 } else {
                     broadcastLog(instanceId, `[ERR] ${line}`);
@@ -712,5 +743,285 @@ function runCommand(command, args, cwd, instanceId, options = {}) {
         });
     });
 }
+// =============================================
+// GSUID Plugin Management
+// =============================================
+
+// GSUID Plugin Index (Hardcoded)
+const GSUID_PLUGINS = [
+    { name: 'StarRailUID', link: 'https://github.com/baiqwerdvd/StarRailUID', author: 'baiqwerdvd', description: '全功能星穹铁道插件' },
+    { name: 'GenshinUID', link: 'https://github.com/KimigaiiWuyi/GenshinUID', author: 'KimigaiiWuyi', description: '全功能原神插件' },
+    { name: 'mys_qrlogin', link: 'https://github.com/RBAmeto/gsuidcore_mys_qrlogin', author: 'RBAmeto', description: '扫码登陆游戏插件' },
+    { name: 'honkai_sign', link: 'https://github.com/RBAmeto/gsuidcore_honkai_sign', author: 'RBAmeto', description: '崩坏三签到插件' },
+    { name: 'maimai_plugin', link: 'https://github.com/Agnes4m/maimai_plugin', author: 'Agnes4m', description: 'maimai插件' },
+    { name: 'WzryUID', link: 'https://github.com/KimigaiiWuyi/WzryUID', author: 'KimigaiiWuyi', description: '全功能王者荣耀插件' },
+    { name: 'ArknightsUID', link: 'https://github.com/baiqwerdvd/ArknightsUID', author: 'baiqwerdvd', description: '全功能明日方舟插件' },
+    { name: 'BlueArchiveUID', link: 'https://github.com/KimigaiiWuyi/BlueArchiveUID', author: 'KimigaiiWuyi', description: '蔚蓝档案插件' },
+    { name: 'PsyTest', link: 'https://github.com/KimigaiiWuyi/gsuidcore_psytest', author: 'KimigaiiWuyi', description: '心理测试集合插件' },
+    { name: 'Pokemon', link: 'https://github.com/jiluoQAQ/Pokemon', author: 'jiluoQAQ', description: '宝可梦小游戏插件' },
+    { name: 'MajsoulUID', link: 'https://github.com/KimigaiiWuyi/MajsoulUID', author: 'KimigaiiWuyi', description: '全功能雀魂查询插件' },
+    { name: 'LOLegendsUID', link: 'https://github.com/KimigaiiWuyi/LOLegendsUID', author: 'KimigaiiWuyi', description: '全功能LOL查询插件' },
+    { name: 'CS2UID', link: 'https://github.com/Agnes4m/CS2UID', author: 'Agnes4m', description: '全功能CS2查询插件' },
+    { name: 'ZZZeroUID', link: 'https://github.com/ZZZure/ZZZeroUID', author: 'ZZZure', description: '全功能绝区零查询插件' },
+    { name: 'XutheringWavesUID', link: 'https://github.com/Loping151/XutheringWavesUID', author: 'Loping151', description: '全功能鸣潮查询插件' },
+    { name: 'VAUID', link: 'https://github.com/Agnes4m/VAUID', author: 'Agnes4m', description: '全功能无畏契约查询插件' },
+    { name: 'SayuStock', link: 'https://github.com/KimigaiiWuyi/SayuStock', author: 'KimigaiiWuyi', description: '股票插件, 查询云图概览等' },
+    { name: 'DeltaUID', link: 'https://github.com/Agnes4m/DeltaUID', author: 'Agnes4m', description: '三角洲查询插件' },
+    { name: 'DNAUID', link: 'https://github.com/tyql688/DNAUID', author: 'tyql688', description: '二重螺旋查询插件' }
+];
+
+// Get GSUID Plugin Store
+router.get('/gsuid-store', (req, res) => {
+    res.json(GSUID_PLUGINS);
+});
+
+// Get Installed GSUID Plugins
+router.get('/gsuid-installed/:instanceId', (req, res) => {
+    const { instanceId } = req.params;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === instanceId);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+
+    // GSUID plugins are in gsuid_core/plugins or just plugins
+    let pluginsDir = path.join(instance.path, 'gsuid_core', 'plugins');
+    if (!fs.existsSync(pluginsDir)) {
+        pluginsDir = path.join(instance.path, 'plugins');
+    }
+    if (!fs.existsSync(pluginsDir)) {
+        return res.json([]);
+    }
+
+    const plugins = [];
+
+    try {
+        const entries = fs.readdirSync(pluginsDir, { withFileTypes: true });
+
+        for (const entry of entries) {
+            if (entry.isDirectory()) {
+                // Skip system directories
+                if (['__pycache__', '.git', 'GsCore'].includes(entry.name)) continue;
+
+                const pluginPath = path.join(pluginsDir, entry.name);
+                let info = { name: entry.name, description: 'No description' };
+
+                // Try to match with store for description
+                const storeMatch = GSUID_PLUGINS.find(p =>
+                    p.name.toLowerCase() === entry.name.toLowerCase() ||
+                    p.link.toLowerCase().includes(entry.name.toLowerCase())
+                );
+                if (storeMatch) {
+                    info.description = storeMatch.description;
+                    info.link = storeMatch.link;
+                }
+
+                // Try to read git config for link
+                if (!info.link) {
+                    const gitConfigPath = path.join(pluginPath, '.git', 'config');
+                    if (fs.existsSync(gitConfigPath)) {
+                        try {
+                            const gitConfig = fs.readFileSync(gitConfigPath, 'utf8');
+                            const urlMatch = gitConfig.match(/url\s*=\s*(.+)/);
+                            if (urlMatch) {
+                                let repoUrl = urlMatch[1].trim();
+                                repoUrl = repoUrl.replace(/^git\+/, '').replace(/\.git$/, '');
+                                info.link = repoUrl;
+                            }
+                        } catch (e) { }
+                    }
+                }
+
+                // Check for requirements.txt (Python dependency indicator)
+                const reqPath = path.join(pluginPath, 'requirements.txt');
+                info.hasRequirements = fs.existsSync(reqPath);
+
+                plugins.push(info);
+            }
+        }
+    } catch (e) {
+        console.error('Error reading GSUID plugins:', e);
+    }
+
+    res.json(plugins);
+});
+
+// Install GSUID Plugin (Async)
+async function installGsuidPlugin(instanceId, name, repoUrl, data) {
+    const instance = data.instances.find(i => i.id === instanceId);
+    if (!instance) return;
+
+    // Determine plugins directory
+    let pluginsDir = path.join(instance.path, 'gsuid_core', 'plugins');
+    if (!fs.existsSync(path.join(instance.path, 'gsuid_core'))) {
+        pluginsDir = path.join(instance.path, 'plugins');
+    }
+    if (!fs.existsSync(pluginsDir)) fs.mkdirSync(pluginsDir, { recursive: true });
+
+    let createdDir = null;
+
+    try {
+        broadcastLog(instanceId, `--- [GSUID] 开始安装插件: ${name} ---`);
+
+        let cleanRepoUrl = repoUrl;
+
+        // APPLY GIT PROXY
+        const downloadMirror = data.settings?.pluginDownloadMirror;
+        if (downloadMirror && cleanRepoUrl.includes('github.com')) {
+            const mirrorBase = downloadMirror.endsWith('/') ? downloadMirror : downloadMirror + '/';
+            if (!cleanRepoUrl.startsWith('https://') && !cleanRepoUrl.startsWith('http://')) {
+                cleanRepoUrl = 'https://' + cleanRepoUrl;
+            }
+            cleanRepoUrl = mirrorBase + cleanRepoUrl;
+            broadcastLog(instanceId, `使用代理: ${mirrorBase}`);
+        }
+
+        // Determine folder name from URL
+        const originalUrl = repoUrl.replace(/\.git$/, '').replace(/\/$/, '');
+        const urlParts = originalUrl.split('/');
+        let folderName = urlParts[urlParts.length - 1];
+        folderName = folderName.replace(/[\\/:*?"<>|]/g, '');
+        const targetDir = path.join(pluginsDir, folderName);
+
+        if (fs.existsSync(targetDir)) {
+            throw new Error(`插件目录 "${folderName}" 已存在。`);
+        }
+
+        createdDir = targetDir;
+
+        // Clone repository
+        broadcastLog(instanceId, `正在克隆仓库: ${cleanRepoUrl}`);
+        await runCommand('git', ['clone', '--depth', '1', cleanRepoUrl, folderName], pluginsDir, instanceId);
+
+        // Check for requirements.txt and install Python dependencies
+        const reqPath = path.join(targetDir, 'requirements.txt');
+        if (fs.existsSync(reqPath)) {
+            broadcastLog(instanceId, '发现 requirements.txt, 正在安装 Python 依赖...');
+
+            // Use bundled uv or global uv
+            // Try multiple possible uv locations
+            const uvPaths = [
+                path.join(BIN_DIR, 'uv-x86_64-pc-windows-msvc', 'uv.exe'),
+                path.join(BIN_DIR, 'uv', 'uv.exe')
+            ];
+            let uvCommand = null;
+
+            for (const uvPath of uvPaths) {
+                if (fs.existsSync(uvPath)) {
+                    uvCommand = uvPath;
+                    broadcastLog(instanceId, '使用内置 uv 安装依赖...');
+                    break;
+                }
+            }
+
+            // If bundled uv not found, try global uv
+            if (!uvCommand) {
+                try {
+                    const { execSync } = require('child_process');
+                    execSync('uv --version', { stdio: 'ignore' });
+                    uvCommand = 'uv';
+                    broadcastLog(instanceId, '使用全局 uv 安装依赖...');
+                } catch (e) {
+                    // Global uv not found either
+                }
+            }
+
+            if (uvCommand) {
+                try {
+                    // Run from targetDir with just 'requirements.txt' since it's the cwd
+                    await runCommand(uvCommand, ['pip', 'install', '-r', 'requirements.txt'], targetDir, instanceId);
+                    broadcastLog(instanceId, 'Python 依赖安装完成。');
+                } catch (e) {
+                    broadcastLog(instanceId, `[WARN] 依赖安装失败: ${e.message}`);
+                    broadcastLog(instanceId, `[WARN] 请手动运行: uv pip install -r requirements.txt`);
+                }
+            } else {
+                broadcastLog(instanceId, '[WARN] 未找到 uv，跳过依赖安装。请手动安装依赖。');
+            }
+        } else {
+            broadcastLog(instanceId, '未发现 requirements.txt，跳过依赖安装。');
+        }
+
+        broadcastLog(instanceId, `--- [GSUID] 插件 ${name} 安装成功 ---`);
+
+    } catch (err) {
+        broadcastLog(instanceId, `--- [GSUID] 安装失败: ${err.message} ---`);
+
+        // Cleanup
+        if (createdDir && fs.existsSync(createdDir)) {
+            try {
+                broadcastLog(instanceId, `[SYSTEM] 清理未完成的安装...`);
+                fs.rmSync(createdDir, { recursive: true, force: true });
+                broadcastLog(instanceId, `[SYSTEM] 清理完成。`);
+            } catch (cleanupErr) {
+                broadcastLog(instanceId, `[WARN] 清理失败: ${cleanupErr.message}`);
+            }
+        }
+    }
+}
+
+router.post('/gsuid-install/:instanceId', (req, res) => {
+    const { instanceId } = req.params;
+    const { name, repoUrl } = req.body;
+
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === instanceId);
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+
+    if (!repoUrl) return res.status(400).json({ error: 'Repo URL required' });
+
+    // Start background process
+    installGsuidPlugin(instanceId, name, repoUrl, data);
+
+    res.json({ status: 'processing', message: 'Installation task submitted' });
+});
+
+// Uninstall GSUID Plugin
+router.delete('/gsuid-uninstall/:instanceId', (req, res) => {
+    try {
+        const { instanceId } = req.params;
+        const { pluginName } = req.body;
+
+        console.log(`[DEBUG] GSUID Uninstall: instanceId=${instanceId}, pluginName=${pluginName}`);
+
+        const data = loadData();
+        const instance = data.instances.find(i => i.id === instanceId);
+        if (!instance) return res.status(404).json({ error: 'Instance not found' });
+
+        if (!pluginName) return res.status(400).json({ error: 'Plugin name required' });
+        if (pluginName.includes('..') || pluginName.includes('/') || pluginName.includes('\\')) {
+            return res.status(400).json({ error: 'Invalid plugin name' });
+        }
+
+        // Try gsuid_core/plugins first, then plugins
+        let targetPath = path.join(instance.path, 'gsuid_core', 'plugins', pluginName);
+        if (!fs.existsSync(targetPath)) {
+            targetPath = path.join(instance.path, 'plugins', pluginName);
+        }
+
+        console.log(`[DEBUG] Target path: ${targetPath}, exists: ${fs.existsSync(targetPath)}`);
+
+        if (fs.existsSync(targetPath)) {
+            try {
+                const stat = fs.statSync(targetPath);
+                if (stat.isDirectory()) {
+                    fs.rmSync(targetPath, { recursive: true, force: true });
+                } else {
+                    fs.unlinkSync(targetPath);
+                }
+
+                broadcastLog(instanceId, `--- [GSUID] 已卸载插件: ${pluginName} ---`);
+                res.json({ success: true });
+            } catch (e) {
+                console.error(`[DEBUG] Delete failed: ${e.message}`);
+                res.status(500).json({ error: e.message });
+            }
+        } else {
+            res.status(404).json({ error: 'Plugin not found' });
+        }
+    } catch (err) {
+        console.error('[FATAL] GSUID Uninstall error:', err);
+        res.status(500).json({ error: 'Internal server error: ' + err.message });
+    }
+});
 
 module.exports = router;

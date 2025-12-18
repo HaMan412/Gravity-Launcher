@@ -38,7 +38,15 @@ const DEPENDENCIES = {
         binPath: 'python.exe',
         version: '3.12.8',
         globalCmd: 'python --version',
-        displayName: 'Python'
+        displayName: 'Python 3.12 (Embed)'
+    },
+    uv: {
+        filename: 'uv.zip',
+        extractDir: 'uv-x86_64-pc-windows-msvc',
+        binPath: 'uv.exe',
+        version: '0.9.18',
+        globalCmd: 'uv --version',
+        displayName: 'uv (Package Manager)'
     }
 };
 
@@ -48,15 +56,39 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://nodejs.org/dist/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip'
+            python: 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip',
+            pypi: 'https://pypi.org/simple',
+            uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
     },
     china: {
-        name: '国内镜像源 (CN)',
+        name: '国内镜像源 (NPMMIRROR)',
         urls: {
             nodejs: 'https://npmmirror.com/mirrors/node/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://npmmirror.com/mirrors/git-for-windows/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-embed-amd64.zip'
+            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-embed-amd64.zip',
+            pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+            uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
+        }
+    },
+    ghproxy: {
+        name: '镜像加速 (GHPROXY)',
+        urls: {
+            nodejs: 'https://mirror.ghproxy.com/https://nodejs.org/dist/v24.12.0/node-v24.12.0-win-x64.zip',
+            git: 'https://mirror.ghproxy.com/https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
+            python: 'https://mirror.ghproxy.com/https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip',
+            pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+            uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
+        }
+    },
+    fastgit: {
+        name: '极速镜像 (FASTGIT)',
+        urls: {
+            nodejs: 'https://download.fastgit.org/nodejs/node/releases/download/v24.12.0/node-v24.12.0-win-x64.zip',
+            git: 'https://download.fastgit.org/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
+            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-embed-amd64.zip',
+            pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+            uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
     }
 };
@@ -65,7 +97,8 @@ const MIRROR_LINES = {
 let downloadState = {
     nodejs: { status: 'idle', progress: 0 },
     git: { status: 'idle', progress: 0 },
-    python: { status: 'idle', progress: 0 }
+    python: { status: 'idle', progress: 0 },
+    uv: { status: 'idle', progress: 0 }
 };
 
 // Helper: Check global installation
@@ -112,7 +145,12 @@ router.get('/status', async (req, res) => {
     // Check downloadable dependencies
     for (const [key, config] of Object.entries(DEPENDENCIES)) {
         const fullExtractDir = path.join(BIN_DIR, config.extractDir);
-        const localInstalled = fs.existsSync(fullExtractDir);
+        // Check exact binary if configured, otherwise check dir
+        let checkPath = fullExtractDir;
+        if (config.binPath) {
+            checkPath = path.join(fullExtractDir, config.binPath);
+        }
+        const localInstalled = fs.existsSync(checkPath);
         const globalInfo = await checkGlobalInstall(key);
 
         status[key] = {
@@ -234,6 +272,12 @@ const net = require('net');
 
 // Redis Start
 router.post('/redis/start', async (req, res) => {
+    // Ensure redis data directory exists
+    const redisDataDir = path.resolve(__dirname, '../../data/redis');
+    if (!fs.existsSync(redisDataDir)) {
+        fs.mkdirSync(redisDataDir, { recursive: true });
+    }
+
     if (redisProcess) {
         return res.json({ success: false, error: 'Redis is already running' });
     }
@@ -267,7 +311,8 @@ router.post('/redis/start', async (req, res) => {
     }
 
     try {
-        redisProcess = spawn(redisPath, [], {
+        // Start redis with --dir pointing to data/redis
+        redisProcess = spawn(redisPath, ['--dir', redisDataDir], {
             detached: false,
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true
@@ -442,6 +487,28 @@ router.post('/install/:name', async (req, res) => {
             const extracted = await extractZip(zipPath, targetExtractDir);
             if (!extracted) {
                 throw new Error('Extraction failed. Check server console.');
+            }
+
+            // Post-extract: check if we have a double-nested directory (e.g., node-vXX/node-vXX/node.exe)
+            // This happens when the zip contains a root folder and we also extract to a subfolder
+            const nestedDir = path.join(targetExtractDir, config.extractDir);
+            if (fs.existsSync(nestedDir) && fs.lstatSync(nestedDir).isDirectory()) {
+                console.log(`[SYSTEM] Flattening nested directory for ${name}...`);
+                const items = fs.readdirSync(nestedDir);
+                for (const item of items) {
+                    const oldPath = path.join(nestedDir, item);
+                    const newPath = path.join(targetExtractDir, item);
+                    // Move if not already exists (though readdirSync items shouldn't exist in parent normally)
+                    if (!fs.existsSync(newPath)) {
+                        fs.renameSync(oldPath, newPath);
+                    }
+                }
+                // Cleanup the now-empty nested dir
+                try {
+                    fs.rmdirSync(nestedDir);
+                } catch (e) {
+                    console.error('[SYSTEM] Failed to remove empty nested dir:', e);
+                }
             }
         }
 

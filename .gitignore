@@ -1,0 +1,12 @@
+# Redis data
+dump.rdb
+*.rdb
+data/redis/
+
+# Logs
+*.log
+logs/
+
+# Development
+.env
+.DS_Store

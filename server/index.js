@@ -7,7 +7,7 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const { init: initWs } = require('./utils/wsHelper');
+const { init: initWs, broadcastGlobalLog } = require('./utils/wsHelper');
 
 // Initialize WebSocket
 initWs(server);
@@ -21,11 +21,17 @@ app.use(express.static(path.join(__dirname, 'public'))); // Serve static files (
 
 const dependencyRoutes = require('./routes/dependencies');
 const instanceRoutes = require('./routes/instances');
+const { router: systemRoutes, setBroadcastGlobalLog } = require('./routes/system');
 
 app.use('/api/dependencies', dependencyRoutes);
 app.use('/api/instances', instanceRoutes);
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/plugins', require('./routes/plugins'));
+app.use('/api/system', systemRoutes);
+app.use('/api/gsuid-adapter', require('./routes/gsuid-adapter'));
+
+// Connect broadcastGlobalLog to system routes
+setBroadcastGlobalLog(broadcastGlobalLog);
 
 // Serve React Frontend
 const clientBuildPath = path.join(__dirname, '../client/dist');
