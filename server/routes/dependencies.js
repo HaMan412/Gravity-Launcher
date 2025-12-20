@@ -588,10 +588,11 @@ router.post('/install/:name', async (req, res) => {
                     broadcastGlobalLog('[SYSTEM] Downloading get-pip.py...');
                     await downloadFile(getPipUrl, getPipPath, () => { });
 
-                    broadcastGlobalLog('[SYSTEM] Installing pip...');
+                    broadcastGlobalLog('[SYSTEM] Installing pip (using China mirror)...');
                     await new Promise((resolve, reject) => {
                         const { spawn } = require('child_process');
-                        const child = spawn(`"${pythonExe}"`, [getPipPath], {
+                        // Use China mirror for faster download
+                        const child = spawn(`"${pythonExe}"`, [getPipPath, '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'], {
                             shell: true,
                             cwd: targetExtractDir,
                             env: { ...process.env, PYTHONUTF8: '1' }
