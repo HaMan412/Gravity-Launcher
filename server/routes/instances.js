@@ -94,13 +94,13 @@ function getGitBinDir() {
 
 // Helper: Get best available Python path
 function getPythonPath() {
-    // 1. Check local portable python (embed version)
-    const localPythonEmbed = path.join(BIN_DIR, 'python-3.12.8-embed-amd64', 'python.exe');
-    if (fs.existsSync(localPythonEmbed)) return localPythonEmbed;
+    // 1. Check local portable python (full version - new)
+    const localPythonFull = path.join(BIN_DIR, 'python-3.12.8-full-amd64', 'python.exe');
+    if (fs.existsSync(localPythonFull)) return localPythonFull;
 
-    // 2. Check NuGet full version (legacy support)
-    const nugetPython = path.join(BIN_DIR, 'python-3.12.8', 'tools', 'python.exe');
-    if (fs.existsSync(nugetPython)) return nugetPython;
+    // 2. Check old embed version (legacy support)
+    const legacyPython = path.join(BIN_DIR, 'python-3.12.8-embed-amd64', 'python.exe');
+    if (fs.existsSync(legacyPython)) return legacyPython;
 
     // 3. Fallback to global python
     return 'python';
@@ -1121,11 +1121,9 @@ router.post('/create', async (req, res) => {
             }
 
 
-            // 2. UV Sync and Install Python Package Manager
+            // 2. UV Sync - installs all dependencies
             broadcastGlobalLog(`[SYSTEM] Installing GSUID dependencies...`);
             await runStep('uv', ['sync'], installPath);
-            broadcastGlobalLog(`[SYSTEM] Ensuring pip is installed...`);
-            await runStep('uv', ['run', 'python', '-m', 'ensurepip'], installPath);
 
 
             // 3. Configure Port (GSUID uses gsuid_core/data/config.json)
@@ -1163,17 +1161,14 @@ router.post('/create', async (req, res) => {
             fs.mkdirSync(installPath, { recursive: true });
             broadcastGlobalLog(`[SYSTEM] Created directory: ${installPath}`);
 
-            // 2. Create virtual environment
+            // 2. Create virtual environment using UV (since embed Python has no venv module)
             broadcastGlobalLog(`[SYSTEM] Creating Python virtual environment...`);
-            await runStep('python', ['-m', 'venv', '.venv', '--prompt', 'nonebot2'], installPath);
+            await runStep('uv', ['venv', '.venv', '--python', getPythonPath()], installPath);
 
-            // 3. Install dependencies
-            const isWin = process.platform === 'win32';
-            const venvPython = path.join(installPath, '.venv', isWin ? 'Scripts' : 'bin', isWin ? 'python.exe' : 'python');
-
+            // 3. Install dependencies using UV (since embed Python has no pip module)
             const packages = ['nonebot2[fastapi]', 'nonebot-adapter-onebot'];
             broadcastGlobalLog(`[SYSTEM] Installing: ${packages.join(', ')}`);
-            await runStep(venvPython, ['-m', 'pip', 'install', ...packages], installPath);
+            await runStep('uv', ['pip', 'install', '--python', path.join(installPath, '.venv', 'Scripts', 'python.exe'), ...packages], installPath);
 
             // 4. Generate pyproject.toml (NEW FORMAT for nb run compatibility)
             const pyprojectContent = `[project]
