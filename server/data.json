@@ -14,13 +14,7 @@
   "instances": [],
   "settings": {
     "redisKeepAlive": false,
-    "proxy": {
-      "protocol": "http",
-      "host": "127.0.0.1",
-      "port": "7897",
-      "username": "",
-      "password": ""
-    },
+    "proxy": null,
     "backgroundImage": "/background.png?t=1765592272692",
     "backgroundOpacity": 0,
     "backgroundImagePath": "F:\\BOT TEST\\Launcher\\server\\public\\background.png"

@@ -123,6 +123,36 @@ function checkGlobalInstall(name) {
     });
 }
 
+// Helper: Get best available Python path
+function getPythonPath() {
+    // 1. Check local portable python
+    const localPython = path.join(BIN_DIR, DEPENDENCIES.python.extractDir, DEPENDENCIES.python.binPath);
+    if (fs.existsSync(localPython)) return localPython;
+
+    // 2. Check global python
+    return 'python';
+}
+
+// Helper: Get best available UV path
+function getUvPath() {
+    // 1. Check local portable uv
+    const localUv = path.join(BIN_DIR, DEPENDENCIES.uv.extractDir, DEPENDENCIES.uv.binPath);
+    if (fs.existsSync(localUv)) return localUv;
+
+    // 2. Check global uv
+    return 'uv';
+}
+
+// Helper: Check if command is available
+function isCommandAvailable(cmd) {
+    return new Promise((resolve) => {
+        const checkCmd = cmd.includes(' ') ? cmd.split(' ')[0] : cmd;
+        exec(`where ${checkCmd}`, (err) => {
+            resolve(!err);
+        });
+    });
+}
+
 // Helper: Load/save preferences
 function loadData() {
     if (!fs.existsSync(DATA_FILE)) return { dependencies: { useGlobal: {} } };
@@ -566,7 +596,11 @@ router.post('/uninstall/:name', (req, res) => {
 // Check nb-cli status
 router.get('/nbcli/status', async (req, res) => {
     try {
-        const result = await new Promise((resolve) => {
+        const uvPath = getUvPath();
+        const hasUv = await isCommandAvailable(uvPath);
+
+        // 1. Try global nb command first
+        let result = await new Promise((resolve) => {
             exec('nb --version', { timeout: 5000 }, (err, stdout) => {
                 if (err) {
                     return resolve({ installed: false, version: null });
@@ -578,69 +612,113 @@ router.get('/nbcli/status', async (req, res) => {
                 });
             });
         });
+
+        // 2. If global failed but uv exists, check uv tools
+        if (!result.installed && hasUv) {
+            result = await new Promise((resolve) => {
+                exec(`"${uvPath}" tool list`, { timeout: 5000 }, (err, stdout) => {
+                    if (!err && stdout.includes('nb-cli')) {
+                        // Extract version if possible, e.g. "nb-cli v1.5.0"
+                        const versionMatch = stdout.match(/nb-cli\s+v?(\d+\.\d+\.\d+)/);
+                        resolve({
+                            installed: true,
+                            version: versionMatch ? versionMatch[1] : 'unknown (uv)'
+                        });
+                    } else {
+                        resolve({ installed: false, version: null });
+                    }
+                });
+            });
+        }
+
         res.json(result);
     } catch (err) {
         res.json({ installed: false, version: null, error: err.message });
     }
 });
 
-// Install nb-cli via pipx
+// Install nb-cli via UV or pipx
 router.post('/nbcli/install', async (req, res) => {
     res.json({ message: 'nb-cli installation started' });
 
-    broadcastGlobalLog('[SYSTEM] Installing nb-cli via pipx...');
-    broadcastGlobalLog('[SYSTEM] Step 1: Ensuring pipx is installed...');
+    const pythonPath = getPythonPath();
+    const uvPath = getUvPath();
+    const hasUv = await isCommandAvailable(uvPath);
 
     try {
-        // Step 1: Ensure pipx is installed
-        await new Promise((resolve, reject) => {
-            exec('python -m pip install --user pipx', { timeout: 120000 }, (err, stdout, stderr) => {
-                if (err) {
-                    broadcastGlobalLog(`[WARN] pipx install warning: ${stderr || err.message}`);
-                }
-                resolve();
+        if (hasUv) {
+            broadcastGlobalLog('[SYSTEM] Detected UV, installing nb-cli via uv tool...');
+            await new Promise((resolve, reject) => {
+                const child = spawn(`"${uvPath}"`, ['tool', 'install', 'nb-cli'], {
+                    shell: true,
+                    env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+                });
+
+                child.stdout.on('data', (data) => {
+                    const text = data.toString().trim();
+                    if (text) broadcastGlobalLog(`[UV] ${text}`);
+                });
+
+                child.stderr.on('data', (data) => {
+                    const text = data.toString().trim();
+                    if (text) broadcastGlobalLog(`[UV] ${text}`);
+                });
+
+                child.on('close', (code) => {
+                    if (code === 0) {
+                        resolve();
+                    } else {
+                        reject(new Error(`uv tool install exited with code ${code}`));
+                    }
+                });
+
+                child.on('error', reject);
             });
-        });
+        } else {
+            broadcastGlobalLog('[SYSTEM] UV not found. Using pipx installation...');
+            broadcastGlobalLog(`[SYSTEM] Using Python: ${pythonPath}`);
 
-        // Step 2: Ensure pipx path
-        await new Promise((resolve, reject) => {
-            exec('python -m pipx ensurepath', { timeout: 30000 }, (err, stdout, stderr) => {
-                if (err) {
-                    broadcastGlobalLog(`[WARN] pipx ensurepath warning: ${stderr || err.message}`);
-                }
-                resolve();
-            });
-        });
-
-        broadcastGlobalLog('[SYSTEM] Step 2: Installing nb-cli...');
-
-        // Step 3: Install nb-cli
-        await new Promise((resolve, reject) => {
-            const child = spawn('python', ['-m', 'pipx', 'install', 'nb-cli'], {
-                shell: true,
-                env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
-            });
-
-            child.stdout.on('data', (data) => {
-                const text = data.toString().trim();
-                if (text) broadcastGlobalLog(`[NB-CLI] ${text}`);
-            });
-
-            child.stderr.on('data', (data) => {
-                const text = data.toString().trim();
-                if (text) broadcastGlobalLog(`[NB-CLI] ${text}`);
-            });
-
-            child.on('close', (code) => {
-                if (code === 0) {
+            // Step 1: Ensure pipx is installed
+            broadcastGlobalLog('[SYSTEM] Step 1: Ensuring pipx is installed...');
+            await new Promise((resolve, reject) => {
+                exec(`"${pythonPath}" -m pip install pipx`, { timeout: 120000 }, (err, stdout, stderr) => {
+                    if (err) {
+                        broadcastGlobalLog(`[WARN] pipx install warning: ${stderr || err.message}`);
+                    }
                     resolve();
-                } else {
-                    reject(new Error(`pipx install nb-cli exited with code ${code}`));
-                }
+                });
             });
 
-            child.on('error', reject);
-        });
+            broadcastGlobalLog('[SYSTEM] Step 2: Installing nb-cli via pipx...');
+
+            // Step 2: Install nb-cli
+            await new Promise((resolve, reject) => {
+                const child = spawn(`"${pythonPath}"`, ['-m', 'pipx', 'install', 'nb-cli'], {
+                    shell: true,
+                    env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+                });
+
+                child.stdout.on('data', (data) => {
+                    const text = data.toString().trim();
+                    if (text) broadcastGlobalLog(`[NB-CLI] ${text}`);
+                });
+
+                child.stderr.on('data', (data) => {
+                    const text = data.toString().trim();
+                    if (text) broadcastGlobalLog(`[NB-CLI] ${text}`);
+                });
+
+                child.on('close', (code) => {
+                    if (code === 0) {
+                        resolve();
+                    } else {
+                        reject(new Error(`pipx install nb-cli exited with code ${code}`));
+                    }
+                });
+
+                child.on('error', reject);
+            });
+        }
 
         broadcastGlobalLog('[SYSTEM] nb-cli installed successfully!');
         broadcastGlobalLog('[SYSTEM] You may need to restart your terminal/launcher for the "nb" command to be available.');
@@ -650,22 +728,40 @@ router.post('/nbcli/install', async (req, res) => {
     }
 });
 
-// Uninstall nb-cli via pipx
+// Uninstall nb-cli via UV or pipx
 router.post('/nbcli/uninstall', async (req, res) => {
     res.json({ message: 'nb-cli uninstallation started' });
 
-    broadcastGlobalLog('[SYSTEM] Uninstalling nb-cli via pipx...');
+    const pythonPath = getPythonPath();
+    const uvPath = getUvPath();
+    const hasUv = await isCommandAvailable(uvPath);
 
     try {
-        await new Promise((resolve, reject) => {
-            exec('python -m pipx uninstall nb-cli', { timeout: 60000 }, (err, stdout, stderr) => {
-                if (err) {
-                    reject(new Error(stderr || err.message));
-                } else {
+        if (hasUv) {
+            broadcastGlobalLog('[SYSTEM] Uninstalling nb-cli via uv tool...');
+            await new Promise((resolve, reject) => {
+                exec(`"${uvPath}" tool uninstall nb-cli`, { timeout: 60000 }, (err, stdout, stderr) => {
+                    if (err) broadcastGlobalLog(`[WARN] uv uninstall warning: ${stderr || err.message}`);
                     resolve(stdout);
-                }
+                });
             });
-        });
+        } else {
+            broadcastGlobalLog('[SYSTEM] Uninstalling nb-cli via pipx...');
+            await new Promise((resolve, reject) => {
+                // Try running pipx through the resolved python
+                exec(`"${pythonPath}" -m pipx uninstall nb-cli`, { timeout: 60000 }, (err, stdout, stderr) => {
+                    if (err) {
+                        broadcastGlobalLog(`[WARN] pipx uninstall error: ${stderr || err.message}`);
+                        // Try fallback to global pipx
+                        exec('pipx uninstall nb-cli', (err2) => {
+                            resolve();
+                        });
+                    } else {
+                        resolve(stdout);
+                    }
+                });
+            });
+        }
 
         broadcastGlobalLog('[SYSTEM] nb-cli uninstalled successfully!');
         res.json({ success: true });
