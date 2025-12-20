@@ -56,6 +56,42 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
+// Helper: Get best available Node.js path
+function getNodePath() {
+    // 1. Check local portable node (flattened structure)
+    const localNode = path.join(BIN_DIR, 'node-v24.12.0-win-x64', 'node.exe');
+    if (fs.existsSync(localNode)) return localNode;
+
+    // 2. Check old/alternative local structure
+    const alternativeNode = path.join(BIN_DIR, 'node', 'node.exe');
+    if (fs.existsSync(alternativeNode)) return alternativeNode;
+
+    // 3. Fallback to global node
+    return 'node';
+}
+
+// Helper: Get best available UV path
+function getUvPath() {
+    // 1. Check local portable uv
+    const localUv = path.join(BIN_DIR, 'uv-x86_64-pc-windows-msvc', 'uv.exe');
+    if (fs.existsSync(localUv)) return localUv;
+
+    // 2. Fallback to global uv
+    return 'uv';
+}
+
+// Helper: Get tool binary directory (for PATH environment)
+function getNodeBinDir() {
+    const nodeExe = getNodePath();
+    if (nodeExe === 'node') return null;
+    return path.dirname(nodeExe);
+}
+
+function getGitBinDir() {
+    const gitBin = path.join(BIN_DIR, 'PortableGit', 'cmd');
+    return fs.existsSync(gitBin) ? gitBin : null;
+}
+
 // Wrapper functions that also store to logHistory
 function broadcastLog(instanceId, message) {
     if (!logHistory[instanceId]) logHistory[instanceId] = [];
@@ -101,15 +137,14 @@ router.post('/start/:id', async (req, res) => {
     const env = { ...process.env };
     let pathParts = [];
 
-    // Define portable tool directories
-    const nodeExtractDir = path.join('node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
-    const nodeBinDir = path.join(BIN_DIR, nodeExtractDir);
-    const gitBinDir = path.join(BIN_DIR, 'PortableGit', 'cmd');
+    // Use helpers to find directories
+    const nodeBinDir = getNodeBinDir();
+    const gitBinDir = getGitBinDir();
     const redisBinDir = path.join(BIN_DIR, 'redis');
     const pythonBinDir = path.join(BIN_DIR, 'python-3.12.8-embed-amd64');
 
     // Only add paths that actually exist
-    if (fs.existsSync(nodeBinDir)) {
+    if (nodeBinDir && fs.existsSync(nodeBinDir)) {
         pathParts.push(nodeBinDir);
         console.log(`Found portable Node.js: ${nodeBinDir}`);
     }
@@ -757,8 +792,8 @@ const runStep = (command, args, cwd, res) => {
 
         // Prepare Environment with bundled tool paths
         const env = { ...process.env };
-        const gitBin = path.join(BIN_DIR, 'PortableGit', 'cmd');
-        const nodeBin = path.join(BIN_DIR, 'node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
+        const gitBin = getGitBinDir();
+        const nodeBin = getNodeBinDir();
         const pythonBin = path.join(BIN_DIR, 'python-3.12.8-embed-amd64');
         const uvBin = path.join(BIN_DIR, 'uv-x86_64-pc-windows-msvc');
 
@@ -920,9 +955,8 @@ router.post('/create', async (req, res) => {
 
     // === Pre-flight checks ===
     if (instanceType === 'yunzai') {
-        const nodeBinDir = path.join(BIN_DIR, 'node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
-        const nodeExe = path.join(nodeBinDir, 'node.exe');
-        const hasPortableNode = fs.existsSync(nodeExe);
+        const nodeExe = getNodePath();
+        const hasPortableNode = nodeExe !== 'node' && fs.existsSync(nodeExe);
         const hasSystemNode = require('child_process').spawnSync('node', ['--version'], { shell: true }).status === 0;
 
         if (!hasPortableNode && !hasSystemNode) {
@@ -931,22 +965,13 @@ router.post('/create', async (req, res) => {
         }
     } else if (instanceType === 'gsuid') {
         // Check for UV
-        // We can check 'uv --version' system-wide or portable
-        // For portable, it's typically in Python Scripts or dedicated folder
-        // For now, assume if they selected GSUID, they might have installed UV via our tool
-        // Ideally we should verify 'uv' command works
-        try {
-            // Check system UV or assume path?
-            // We'll check via spawn, but do not block strict for now if we can't find it easily? 
-            // Better to block to prevent failure.
-            // Using 'where uv' or 'uv --version'
-            const uvCheck = require('child_process').spawnSync('uv', ['--version'], { shell: true });
-            if (uvCheck.status !== 0) {
-                broadcastGlobalLog(`[ERR] 'uv' command not found. Please install UV in Environment Management.`);
-                return res.status(400).json({ error: '未检测到 uv 命令，请在环境管理中安装 UV' });
-            }
-        } catch (e) {
-            // ignore
+        const uvExe = getUvPath();
+        const hasPortableUv = uvExe !== 'uv' && fs.existsSync(uvExe);
+        const hasSystemUv = require('child_process').spawnSync('uv', ['--version'], { shell: true }).status === 0;
+
+        if (!hasPortableUv && !hasSystemUv) {
+            broadcastGlobalLog(`[ERR] 'uv' command not found. Please install UV in Environment Management.`);
+            return res.status(400).json({ error: '未检测到 uv 命令，请在环境管理中安装 UV' });
         }
     } else if (instanceType === 'nonebot') {
         // Check for Python
@@ -960,13 +985,12 @@ router.post('/create', async (req, res) => {
         }
     }
 
-    const gitBinDir = path.join(BIN_DIR, 'PortableGit', 'cmd');
-    const gitExe = path.join(gitBinDir, 'git.exe');
-    const hasPortableGit = fs.existsSync(gitExe);
+    const gitBinDir = getGitBinDir();
+    const hasPortableGit = gitBinDir && fs.existsSync(path.join(gitBinDir, 'git.exe'));
     const hasSystemGit = require('child_process').spawnSync('git', ['--version'], { shell: true }).status === 0;
 
     if (!hasPortableGit && !hasSystemGit) {
-        broadcastGlobalLog(`[ERR] Git not found.`);
+        broadcastGlobalLog(`[ERR] Git not found. Please install Git.`);
         return res.status(400).json({ error: '未检测到 Git，请先安装' });
     }
     // === End Pre-flight checks ===
@@ -1702,7 +1726,7 @@ router.post('/import', async (req, res) => {
             // Prepare environment with bundled tools
             const binDir = path.resolve(__dirname, '../../bin');
             const env = { ...process.env, CI: 'true' };
-            const nodeBin = path.join(binDir, 'node-v24.12.0-win-x64'); // This should be the directory containing node.exe and pnpm.cmd
+            const nodeBin = getNodeBinDir() || 'node';
 
             if (isWin) {
                 let pathKey = 'PATH';
