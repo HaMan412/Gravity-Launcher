@@ -747,11 +747,32 @@ router.post('/nbcli/install', async (req, res) => {
 
     try {
         if (hasUv) {
-            broadcastGlobalLog('[SYSTEM] Detected UV, installing nb-cli via uv tool...');
+            // Check if we have local Python to use
+            const localPythonPath = getPythonPath();
+            const hasLocalPython = localPythonPath !== 'python' && await isCommandAvailable(localPythonPath);
+
+            if (hasLocalPython) {
+                broadcastGlobalLog('[SYSTEM] Detected UV and local Python, installing nb-cli...');
+                broadcastGlobalLog(`[SYSTEM] Using Python: ${localPythonPath}`);
+            } else {
+                broadcastGlobalLog('[SYSTEM] Detected UV, installing nb-cli via uv tool...');
+            }
+
+            // Build command args
+            const uvArgs = ['tool', 'install', 'nb-cli'];
+            if (hasLocalPython) {
+                uvArgs.push('--python', localPythonPath);
+            }
+
             await new Promise((resolve, reject) => {
-                const child = spawn(`"${uvPath}"`, ['tool', 'install', 'nb-cli'], {
+                const child = spawn(`"${uvPath}"`, uvArgs, {
                     shell: true,
-                    env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+                    env: {
+                        ...process.env,
+                        PYTHONUTF8: '1',
+                        PYTHONIOENCODING: 'utf-8',
+                        UV_PYTHON_DOWNLOADS: hasLocalPython ? 'never' : 'automatic'
+                    }
                 });
 
                 child.stdout.on('data', (data) => {
