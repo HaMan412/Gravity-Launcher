@@ -581,12 +581,29 @@ router.post('/install/:name', async (req, res) => {
                         }
                     }
 
-                    // Step 2: Download and run get-pip.py (using China mirror)
-                    const getPipUrl = 'https://mirrors.tuna.tsinghua.edu.cn/pypi/packages/pip/get-pip.py';
+                    // Step 2: Download and run get-pip.py
+                    // Try multiple sources for better availability
+                    const getPipSources = [
+                        'https://gitee.com/hamann/get-pip.py/raw/master/get-pip.py',
+                        'https://bootstrap.pypa.io/get-pip.py'
+                    ];
                     const getPipPath = path.join(targetExtractDir, 'get-pip.py');
 
                     broadcastGlobalLog('[SYSTEM] Downloading get-pip.py...');
-                    await downloadFile(getPipUrl, getPipPath, () => { });
+                    let downloaded = false;
+                    for (const getPipUrl of getPipSources) {
+                        try {
+                            broadcastGlobalLog(`[SYSTEM] Trying: ${getPipUrl}`);
+                            await downloadFile(getPipUrl, getPipPath, () => { });
+                            downloaded = true;
+                            break;
+                        } catch (e) {
+                            broadcastGlobalLog(`[WARN] Failed from ${getPipUrl}, trying next...`);
+                        }
+                    }
+                    if (!downloaded) {
+                        throw new Error('Failed to download get-pip.py from all sources');
+                    }
 
                     broadcastGlobalLog('[SYSTEM] Installing pip (using China mirror)...');
                     await new Promise((resolve, reject) => {
