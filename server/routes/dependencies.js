@@ -33,12 +33,12 @@ const DEPENDENCIES = {
         selfExtract: true
     },
     python: {
-        filename: 'python.zip',
-        extractDir: 'python-3.12.8-embed-amd64',
-        binPath: 'python.exe',
+        filename: 'python.nupkg',
+        extractDir: 'python-3.12.8',
+        binPath: 'tools/python.exe',
         version: '3.12.8',
         globalCmd: 'python --version',
-        displayName: 'Python 3.12 (Embed)'
+        displayName: 'Python 3.12 (Full)'
     },
     uv: {
         filename: 'uv.zip',
@@ -56,7 +56,7 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://nodejs.org/dist/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip',
+            python: 'https://www.nuget.org/api/v2/package/python/3.12.8',
             pypi: 'https://pypi.org/simple',
             uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
@@ -66,7 +66,7 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://npmmirror.com/mirrors/node/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://npmmirror.com/mirrors/git-for-windows/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-embed-amd64.zip',
+            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-amd64.exe',
             pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
             uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
@@ -76,7 +76,7 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://mirror.ghproxy.com/https://nodejs.org/dist/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://mirror.ghproxy.com/https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://mirror.ghproxy.com/https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip',
+            python: 'https://www.nuget.org/api/v2/package/python/3.12.8',
             pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
             uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
@@ -86,7 +86,7 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://download.fastgit.org/nodejs/node/releases/download/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://download.fastgit.org/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-embed-amd64.zip',
+            python: 'https://www.nuget.org/api/v2/package/python/3.12.8',
             pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
             uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
@@ -125,11 +125,15 @@ function checkGlobalInstall(name) {
 
 // Helper: Get best available Python path
 function getPythonPath() {
-    // 1. Check local portable python
-    const localPython = path.join(BIN_DIR, DEPENDENCIES.python.extractDir, DEPENDENCIES.python.binPath);
-    if (fs.existsSync(localPython)) return localPython;
+    // 1. Check local portable python (NuGet full version)
+    const localPythonNuget = path.join(BIN_DIR, DEPENDENCIES.python.extractDir, DEPENDENCIES.python.binPath);
+    if (fs.existsSync(localPythonNuget)) return localPythonNuget;
 
-    // 2. Check global python
+    // 2. Check old embed version (legacy support)
+    const legacyPython = path.join(BIN_DIR, 'python-3.12.8-embed-amd64', 'python.exe');
+    if (fs.existsSync(legacyPython)) return legacyPython;
+
+    // 3. Fallback to global python
     return 'python';
 }
 

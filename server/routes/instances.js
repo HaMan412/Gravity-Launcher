@@ -92,6 +92,20 @@ function getGitBinDir() {
     return fs.existsSync(gitBin) ? gitBin : null;
 }
 
+// Helper: Get best available Python path
+function getPythonPath() {
+    // 1. Check local portable python (NuGet full version)
+    const localPythonNuget = path.join(BIN_DIR, 'python-3.12.8', 'tools', 'python.exe');
+    if (fs.existsSync(localPythonNuget)) return localPythonNuget;
+
+    // 2. Check old embed version (legacy support)
+    const legacyPython = path.join(BIN_DIR, 'python-3.12.8-embed-amd64', 'python.exe');
+    if (fs.existsSync(legacyPython)) return legacyPython;
+
+    // 3. Fallback to global python
+    return 'python';
+}
+
 // Wrapper functions that also store to logHistory
 function broadcastLog(instanceId, message) {
     if (!logHistory[instanceId]) logHistory[instanceId] = [];
@@ -975,8 +989,8 @@ router.post('/create', async (req, res) => {
         }
     } else if (instanceType === 'nonebot') {
         // Check for Python
-        const pythonBinDir = path.join(BIN_DIR, 'python-3.12.8-embed-amd64');
-        const hasPortablePython = fs.existsSync(path.join(pythonBinDir, 'python.exe'));
+        const pythonExe = getPythonPath();
+        const hasPortablePython = pythonExe !== 'python' && fs.existsSync(pythonExe);
         const hasPythonInPath = require('child_process').spawnSync('python', ['--version'], { shell: true }).status === 0;
 
         if (!hasPortablePython && !hasPythonInPath) {
