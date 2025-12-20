@@ -94,13 +94,13 @@ function getGitBinDir() {
 
 // Helper: Get best available Python path
 function getPythonPath() {
-    // 1. Check local portable python (NuGet full version)
-    const localPythonNuget = path.join(BIN_DIR, 'python-3.12.8', 'tools', 'python.exe');
-    if (fs.existsSync(localPythonNuget)) return localPythonNuget;
+    // 1. Check local portable python (embed version)
+    const localPythonEmbed = path.join(BIN_DIR, 'python-3.12.8-embed-amd64', 'python.exe');
+    if (fs.existsSync(localPythonEmbed)) return localPythonEmbed;
 
-    // 2. Check old embed version (legacy support)
-    const legacyPython = path.join(BIN_DIR, 'python-3.12.8-embed-amd64', 'python.exe');
-    if (fs.existsSync(legacyPython)) return legacyPython;
+    // 2. Check NuGet full version (legacy support)
+    const nugetPython = path.join(BIN_DIR, 'python-3.12.8', 'tools', 'python.exe');
+    if (fs.existsSync(nugetPython)) return nugetPython;
 
     // 3. Fallback to global python
     return 'python';

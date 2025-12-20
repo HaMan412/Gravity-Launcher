@@ -33,12 +33,12 @@ const DEPENDENCIES = {
         selfExtract: true
     },
     python: {
-        filename: 'python.nupkg',
-        extractDir: 'python-3.12.8',
-        binPath: 'tools/python.exe',
+        filename: 'python.zip',
+        extractDir: 'python-3.12.8-embed-amd64',
+        binPath: 'python.exe',
         version: '3.12.8',
         globalCmd: 'python --version',
-        displayName: 'Python 3.12 (Full)'
+        displayName: 'Python 3.12'
     },
     uv: {
         filename: 'uv.zip',
@@ -56,7 +56,7 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://nodejs.org/dist/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://www.nuget.org/api/v2/package/python/3.12.8',
+            python: 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip',
             pypi: 'https://pypi.org/simple',
             uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
@@ -66,7 +66,7 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://npmmirror.com/mirrors/node/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://npmmirror.com/mirrors/git-for-windows/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-amd64.exe',
+            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-embed-amd64.zip',
             pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
             uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
@@ -76,7 +76,7 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://mirror.ghproxy.com/https://nodejs.org/dist/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://mirror.ghproxy.com/https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://www.nuget.org/api/v2/package/python/3.12.8',
+            python: 'https://mirror.ghproxy.com/https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip',
             pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
             uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
@@ -86,7 +86,7 @@ const MIRROR_LINES = {
         urls: {
             nodejs: 'https://download.fastgit.org/nodejs/node/releases/download/v24.12.0/node-v24.12.0-win-x64.zip',
             git: 'https://download.fastgit.org/git-for-windows/git/releases/download/v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe',
-            python: 'https://www.nuget.org/api/v2/package/python/3.12.8',
+            python: 'https://npmmirror.com/mirrors/python/3.12.8/python-3.12.8-embed-amd64.zip',
             pypi: 'https://pypi.tuna.tsinghua.edu.cn/simple',
             uv: 'https://gitee.com/hamann/uv-gitee/releases/download/0.9.18/uv-x86_64-pc-windows-msvc.zip'
         }
@@ -125,13 +125,13 @@ function checkGlobalInstall(name) {
 
 // Helper: Get best available Python path
 function getPythonPath() {
-    // 1. Check local portable python (NuGet full version)
-    const localPythonNuget = path.join(BIN_DIR, DEPENDENCIES.python.extractDir, DEPENDENCIES.python.binPath);
-    if (fs.existsSync(localPythonNuget)) return localPythonNuget;
+    // 1. Check local portable python (embed version)
+    const localPythonEmbed = path.join(BIN_DIR, DEPENDENCIES.python.extractDir, DEPENDENCIES.python.binPath);
+    if (fs.existsSync(localPythonEmbed)) return localPythonEmbed;
 
-    // 2. Check old embed version (legacy support)
-    const legacyPython = path.join(BIN_DIR, 'python-3.12.8-embed-amd64', 'python.exe');
-    if (fs.existsSync(legacyPython)) return legacyPython;
+    // 2. Check NuGet full version (legacy support)
+    const nugetPython = path.join(BIN_DIR, 'python-3.12.8', 'tools', 'python.exe');
+    if (fs.existsSync(nugetPython)) return nugetPython;
 
     // 3. Fallback to global python
     return 'python';
@@ -558,6 +558,79 @@ router.post('/install/:name', async (req, res) => {
         console.log(`${name} installed successfully.`);
         broadcastGlobalLog(`${name} Installed Successfully!`);
         broadcastGlobalLog(`Path: ${targetExtractDir}`);
+
+        // Special handling for Python: install pip if not present
+        if (name === 'python') {
+            const pythonExe = path.join(targetExtractDir, config.binPath);
+            const pipExe = path.join(targetExtractDir, 'Scripts', 'pip.exe');
+
+            if (!fs.existsSync(pipExe)) {
+                broadcastGlobalLog('[SYSTEM] Setting up pip for Python...');
+
+                try {
+                    // Step 1: Modify the ._pth file to enable site-packages
+                    const pthFiles = fs.readdirSync(targetExtractDir).filter(f => f.endsWith('._pth'));
+                    for (const pthFile of pthFiles) {
+                        const pthPath = path.join(targetExtractDir, pthFile);
+                        let content = fs.readFileSync(pthPath, 'utf8');
+                        // Uncomment 'import site' line
+                        if (content.includes('#import site')) {
+                            content = content.replace('#import site', 'import site');
+                            fs.writeFileSync(pthPath, content);
+                            broadcastGlobalLog('[SYSTEM] Enabled site-packages in Python.');
+                        }
+                    }
+
+                    // Step 2: Download and run get-pip.py
+                    const getPipUrl = 'https://bootstrap.pypa.io/get-pip.py';
+                    const getPipPath = path.join(targetExtractDir, 'get-pip.py');
+
+                    broadcastGlobalLog('[SYSTEM] Downloading get-pip.py...');
+                    await downloadFile(getPipUrl, getPipPath, () => { });
+
+                    broadcastGlobalLog('[SYSTEM] Installing pip...');
+                    await new Promise((resolve, reject) => {
+                        const { spawn } = require('child_process');
+                        const child = spawn(`"${pythonExe}"`, [getPipPath], {
+                            shell: true,
+                            cwd: targetExtractDir,
+                            env: { ...process.env, PYTHONUTF8: '1' }
+                        });
+
+                        child.stdout.on('data', (data) => {
+                            const text = data.toString().trim();
+                            if (text) broadcastGlobalLog(`[PIP] ${text}`);
+                        });
+
+                        child.stderr.on('data', (data) => {
+                            const text = data.toString().trim();
+                            if (text) broadcastGlobalLog(`[PIP] ${text}`);
+                        });
+
+                        child.on('close', (code) => {
+                            if (code === 0) {
+                                resolve();
+                            } else {
+                                reject(new Error(`get-pip.py exited with code ${code}`));
+                            }
+                        });
+
+                        child.on('error', reject);
+                    });
+
+                    // Cleanup
+                    if (fs.existsSync(getPipPath)) {
+                        fs.unlinkSync(getPipPath);
+                    }
+
+                    broadcastGlobalLog('[SYSTEM] pip installed successfully!');
+                } catch (pipErr) {
+                    console.error('Failed to install pip:', pipErr);
+                    broadcastGlobalLog(`[WARN] Failed to install pip: ${pipErr.message}`);
+                    broadcastGlobalLog('[WARN] You may need to install pip manually.');
+                }
+            }
+        }
 
     } catch (err) {
         console.error(`Error installing ${name}:`, err);
