@@ -808,8 +808,11 @@ const runStep = (command, args, cwd, res) => {
         const env = { ...process.env };
         const gitBin = getGitBinDir();
         const nodeBin = getNodeBinDir();
-        const pythonBin = path.join(BIN_DIR, 'python-3.12.8-embed-amd64');
+        const pythonBin = path.dirname(getPythonPath());
         const uvBin = path.join(BIN_DIR, 'uv-x86_64-pc-windows-msvc');
+
+        // Tell UV to use local Python, not download
+        env.UV_PYTHON_DOWNLOADS = 'never';
 
         // Prepend to PATH
         if (isWin) {
@@ -1121,9 +1124,11 @@ router.post('/create', async (req, res) => {
             }
 
 
-            // 2. UV Sync - installs all dependencies
+            // 2. UV Sync - installs all dependencies using local Python
+            const localPython = getPythonPath();
             broadcastGlobalLog(`[SYSTEM] Installing GSUID dependencies...`);
-            await runStep('uv', ['sync'], installPath);
+            broadcastGlobalLog(`[SYSTEM] Using Python: ${localPython}`);
+            await runStep('uv', ['sync', '--python', localPython], installPath);
 
 
             // 3. Configure Port (GSUID uses gsuid_core/data/config.json)

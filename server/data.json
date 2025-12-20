@@ -11,20 +11,7 @@
     "customUrls": {},
     "selectedMirror": "china"
   },
-  "instances": [
-    {
-      "id": "1766226657092",
-      "name": "31231",
-      "path": "F:\\BOT TEST\\Launcher\\public\\Launcher\\instances\\31231",
-      "port": "2536",
-      "redis": {
-        "mode": "shared",
-        "port": 6379
-      },
-      "created": true,
-      "type": "gsuid"
-    }
-  ],
+  "instances": [],
   "settings": {
     "redisKeepAlive": false,
     "proxy": null,
