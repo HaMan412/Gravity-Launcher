@@ -146,8 +146,13 @@ function getUvPath() {
 // Helper: Check if command is available
 function isCommandAvailable(cmd) {
     return new Promise((resolve) => {
-        const checkCmd = cmd.includes(' ') ? cmd.split(' ')[0] : cmd;
-        exec(`where ${checkCmd}`, (err) => {
+        // If it's an absolute path, check directly with fs.existsSync
+        if (path.isAbsolute(cmd)) {
+            resolve(fs.existsSync(cmd));
+            return;
+        }
+        // Otherwise use 'where' to check system PATH
+        exec(`where ${cmd}`, (err) => {
             resolve(!err);
         });
     });
