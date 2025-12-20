@@ -581,8 +581,8 @@ router.post('/install/:name', async (req, res) => {
                         }
                     }
 
-                    // Step 2: Download and run get-pip.py
-                    const getPipUrl = 'https://bootstrap.pypa.io/get-pip.py';
+                    // Step 2: Download and run get-pip.py (using China mirror)
+                    const getPipUrl = 'https://mirrors.tuna.tsinghua.edu.cn/pypi/packages/pip/get-pip.py';
                     const getPipPath = path.join(targetExtractDir, 'get-pip.py');
 
                     broadcastGlobalLog('[SYSTEM] Downloading get-pip.py...');
