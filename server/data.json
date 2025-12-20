@@ -11,36 +11,7 @@
     "customUrls": {},
     "selectedMirror": "china"
   },
-  "instances": [
-    {
-      "id": "1766162340271",
-      "name": "3123",
-      "path": "F:\\BOT TEST\\1231",
-      "port": "2538",
-      "created": 1766162340271,
-      "type": "nonebot",
-      "isImported": true,
-      "redis": {
-        "mode": "shared",
-        "port": 6379
-      },
-      "config": {
-        "masterQQ": ""
-      }
-    },
-    {
-      "id": "1766165844773",
-      "name": "yyz",
-      "path": "F:\\BOT TEST\\Launcher\\public\\Launcher\\instances\\yyz",
-      "port": "2536",
-      "redis": {
-        "mode": "shared",
-        "port": 6379
-      },
-      "created": true,
-      "type": "yunzai"
-    }
-  ],
+  "instances": [],
   "settings": {
     "redisKeepAlive": false,
     "proxy": {
@@ -54,5 +25,5 @@
     "backgroundOpacity": 0,
     "backgroundImagePath": "F:\\BOT TEST\\Launcher\\server\\public\\background.png"
   },
-  "llonebotPath": "F:\\BOT TEST\\LLOnebot"
+  "llonebotPath": ""
 }
