@@ -199,6 +199,42 @@ router.post('/start/:id', async (req, res) => {
             env: gsuidEnv,
             shell: true
         });
+    } else if (instanceType === 'nonebot') {
+        // NoneBot: Check if project was created with nb-cli (has pyproject.toml)
+        const pyprojectPath = path.join(instance.path, 'pyproject.toml');
+        const usesNbCli = fs.existsSync(pyprojectPath);
+
+        // Always use venv python directly to run bot.py (most reliable)
+        // nb run can have issues with Python path resolution
+        const venvPython = path.join(instance.path, '.venv', 'Scripts', 'python.exe');
+        const botPy = path.join(instance.path, 'bot.py');
+
+        // Check if venv exists
+        if (!fs.existsSync(venvPython)) {
+            broadcastLog(id, `--- ERROR: Virtual environment not found. Please recreate the instance. ---`);
+            return res.status(500).json({ error: 'Virtual environment not found' });
+        }
+
+        // Check if bot.py exists
+        if (!fs.existsSync(botPy)) {
+            broadcastLog(id, `--- ERROR: bot.py not found. Please check the instance. ---`);
+            return res.status(500).json({ error: 'bot.py not found' });
+        }
+
+        console.log(`Starting NoneBot with: ${venvPython} ${botPy}`);
+        broadcastLog(id, `Starting NoneBot...`);
+        broadcastLog(id, `Using Python: ${venvPython}`);
+
+        child = spawn(venvPython, [botPy], {
+            cwd: instance.path,
+            env: {
+                ...env,
+                PYTHONUTF8: '1',
+                PYTHONIOENCODING: 'utf-8',
+                VIRTUAL_ENV: path.join(instance.path, '.venv')
+            }
+        });
+
     } else {
         // Yunzai-Bot uses: node app.js
         console.log(`Using Node.js: ${process.execPath}`);
@@ -402,7 +438,315 @@ router.post('/autostart/:id', (req, res) => {
     res.json({ success: true, autoStart });
 });
 
-// Helper to execute command and stream logs
+// NoneBot: Get .env file content
+router.get('/nonebot/env/:id', (req, res) => {
+    const { id } = req.params;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === id);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+    if (instance.type !== 'nonebot') return res.status(400).json({ error: 'Not a NoneBot instance' });
+
+    const envPath = path.join(instance.path, '.env');
+    if (!fs.existsSync(envPath)) {
+        return res.json({ content: '' });
+    }
+
+    try {
+        const content = fs.readFileSync(envPath, 'utf8');
+        res.json({ content });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to read .env file' });
+    }
+});
+
+// NoneBot: Save .env file content
+router.put('/nonebot/env/:id', (req, res) => {
+    const { id } = req.params;
+    const { content } = req.body;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === id);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+    if (instance.type !== 'nonebot') return res.status(400).json({ error: 'Not a NoneBot instance' });
+
+    const envPath = path.join(instance.path, '.env');
+
+    try {
+        fs.writeFileSync(envPath, content, 'utf8');
+
+        // Also update port in data.json if PORT changed
+        const portMatch = content.match(/^PORT\s*=\s*(\d+)/m);
+        if (portMatch) {
+            instance.port = portMatch[1];
+            saveData(data);
+        }
+
+        broadcastGlobalLog(`[SYSTEM] NoneBot .env updated for ${instance.name}`);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to save .env file' });
+    }
+});
+
+// NoneBot: Get bot.py file content
+router.get('/nonebot/bot-py/:id', (req, res) => {
+    const { id } = req.params;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === id);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+    if (instance.type !== 'nonebot') return res.status(400).json({ error: 'Not a NoneBot instance' });
+
+    const botPath = path.join(instance.path, 'bot.py');
+    if (!fs.existsSync(botPath)) {
+        return res.json({ content: '' });
+    }
+
+    try {
+        const content = fs.readFileSync(botPath, 'utf8');
+        res.json({ content });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to read bot.py file' });
+    }
+});
+
+// NoneBot: Save bot.py file content
+router.put('/nonebot/bot-py/:id', (req, res) => {
+    const { id } = req.params;
+    const { content } = req.body;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === id);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+    if (instance.type !== 'nonebot') return res.status(400).json({ error: 'Not a NoneBot instance' });
+
+    const botPath = path.join(instance.path, 'bot.py');
+
+    try {
+        fs.writeFileSync(botPath, content, 'utf8');
+        broadcastGlobalLog(`[SYSTEM] NoneBot bot.py updated for ${instance.name}`);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to save bot.py file' });
+    }
+});
+
+// NoneBot: Get pyproject.toml file content
+router.get('/nonebot/pyproject/:id', (req, res) => {
+    const { id } = req.params;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === id);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+    if (instance.type !== 'nonebot') return res.status(400).json({ error: 'Not a NoneBot instance' });
+
+    const pyprojectPath = path.join(instance.path, 'pyproject.toml');
+
+    if (!fs.existsSync(pyprojectPath)) {
+        return res.json({ content: '' });
+    }
+
+    try {
+        const content = fs.readFileSync(pyprojectPath, 'utf8');
+        res.json({ content });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to read pyproject.toml file' });
+    }
+});
+
+// NoneBot: Save pyproject.toml file content
+router.put('/nonebot/pyproject/:id', (req, res) => {
+    const { id } = req.params;
+    const { content } = req.body;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === id);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+    if (instance.type !== 'nonebot') return res.status(400).json({ error: 'Not a NoneBot instance' });
+
+    const pyprojectPath = path.join(instance.path, 'pyproject.toml');
+
+    try {
+        fs.writeFileSync(pyprojectPath, content, 'utf8');
+        broadcastGlobalLog(`[SYSTEM] NoneBot pyproject.toml updated for ${instance.name}`);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to save pyproject.toml file' });
+    }
+});
+
+// ============ LLOneBot Integration APIs ============
+
+
+// Get LLOneBot path from data.json
+router.get('/llonebot/path', (req, res) => {
+    const data = loadData();
+    res.json({ path: data.llonebotPath || '' });
+});
+
+// Save LLOneBot path to data.json
+router.put('/llonebot/path', (req, res) => {
+    const { path: llonebotPath } = req.body;
+    const data = loadData();
+    data.llonebotPath = llonebotPath;
+    saveData(data);
+    broadcastGlobalLog(`[SYSTEM] LLOneBot path set to: ${llonebotPath}`);
+    res.json({ success: true });
+});
+
+// Detect LLOneBot configs (scan for config_*.json files)
+// Supports both old (data/) and new (bin/llonebot/data/) directory structures
+router.get('/llonebot/detect', (req, res) => {
+    const data = loadData();
+    const llonebotPath = data.llonebotPath;
+
+    if (!llonebotPath || !fs.existsSync(llonebotPath)) {
+        return res.json({ configured: false, configs: [], version: 'unknown' });
+    }
+
+    // Auto-detect directory structure: new version uses bin/llonebot/data/, old uses data/
+    const newDataDir = path.join(llonebotPath, 'bin', 'llonebot', 'data');
+    const oldDataDir = path.join(llonebotPath, 'data');
+
+    let dataDir = null;
+    let version = 'unknown';
+
+    if (fs.existsSync(newDataDir)) {
+        dataDir = newDataDir;
+        version = 'new'; // New standalone LLOneBot (llbot.exe)
+    } else if (fs.existsSync(oldDataDir)) {
+        dataDir = oldDataDir;
+        version = 'legacy'; // Old LiteLoaderQQNT plugin version
+    }
+
+    if (!dataDir) {
+        return res.json({ configured: true, configs: [], version });
+    }
+
+    try {
+        const files = fs.readdirSync(dataDir);
+        const configs = files
+            .filter(f => f.startsWith('config_') && f.endsWith('.json'))
+            .map(f => {
+                const qq = f.replace('config_', '').replace('.json', '');
+                const configPath = path.join(dataDir, f);
+                try {
+                    const content = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                    const wsReverse = content.ob11?.connect?.find(c => c.type === 'ws-reverse');
+                    return {
+                        qq,
+                        configPath,
+                        currentUrl: wsReverse?.url || '',
+                        enabled: wsReverse?.enable || false
+                    };
+                } catch {
+                    return { qq, configPath, currentUrl: '', enabled: false };
+                }
+            });
+
+        res.json({ configured: true, configs, version });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to scan LLOneBot configs' });
+    }
+});
+
+// Helper: Resolve LLOneBot config path (auto-detect new/old structure)
+function resolveLLOneBotConfigPath(llonebotPath, qq) {
+    // New version: bin/llonebot/data/config_*.json
+    const newPath = path.join(llonebotPath, 'bin', 'llonebot', 'data', `config_${qq}.json`);
+    if (fs.existsSync(newPath)) return newPath;
+
+    // Old version: data/config_*.json
+    const oldPath = path.join(llonebotPath, 'data', `config_${qq}.json`);
+    if (fs.existsSync(oldPath)) return oldPath;
+
+    return null;
+}
+
+// Configure LLOneBot to connect to an instance
+router.put('/llonebot/connect', (req, res) => {
+    const { qq, instanceId, instanceName, instanceType, port } = req.body;
+    const data = loadData();
+    const llonebotPath = data.llonebotPath;
+
+    if (!llonebotPath) {
+        return res.status(400).json({ error: 'LLOneBot path not configured' });
+    }
+
+    // Auto-detect config path for both new and old versions
+    const configPath = resolveLLOneBotConfigPath(llonebotPath, qq);
+    if (!configPath) {
+        return res.status(404).json({ error: 'LLOneBot config not found' });
+    }
+
+    try {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+        // Build the connection URL based on instance type
+        // NoneBot uses /onebot/v11/ws, Yunzai (TRSS) uses /OneBotv11
+        const url = instanceType === 'nonebot'
+            ? `ws://127.0.0.1:${port}/onebot/v11/ws`
+            : `ws://127.0.0.1:${port}/OneBotv11`;
+
+        const adapterName = `Gravity-${instanceName}`;
+        let status = 'created';
+
+        // Ensure ob11 structure exists
+        if (!config.ob11) config.ob11 = { enable: true, connect: [] };
+        if (!config.ob11.connect) config.ob11.connect = [];
+
+        // Check if adapter with same name already exists
+        const existingIndex = config.ob11.connect.findIndex(c => c.name === adapterName);
+        if (existingIndex !== -1) {
+            const existing = config.ob11.connect[existingIndex];
+            // Check if content is already identical
+            if (existing.url === url && existing.type === 'ws-reverse' && existing.enable === true) {
+                status = 'exists';
+            } else {
+                // Update existing adapter with same name
+                config.ob11.connect[existingIndex] = {
+                    ...existing,
+                    type: 'ws-reverse',
+                    enable: true,
+                    url,
+                    name: adapterName
+                };
+                status = 'updated';
+                broadcastGlobalLog(`[SYSTEM] Updated LLOneBot adapter: ${adapterName}`);
+            }
+        } else {
+            // Create NEW adapter
+            config.ob11.connect.push({
+                type: 'ws-reverse',
+                enable: true,
+                url,
+                name: adapterName,
+                heartInterval: 5000,
+                token: '',
+                reportSelfMessage: false,
+                reportOfflineMessage: false,
+                messageFormat: 'array',
+                debug: false
+            });
+            status = 'created';
+            broadcastGlobalLog(`[SYSTEM] Created new LLOneBot adapter: ${adapterName}`);
+        }
+
+        // Ensure ob11 is enabled
+        config.ob11.enable = true;
+
+        if (status !== 'exists') {
+            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+            broadcastGlobalLog(`[SYSTEM] LLOneBot configured to connect to ${instanceName} (${url})`);
+        }
+
+        res.json({ success: true, url, adapterName, status });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to update LLOneBot config' });
+    }
+});
+
 const runStep = (command, args, cwd, res) => {
     return new Promise((resolve, reject) => {
         const cmdStr = `${command} ${args.join(' ')}`;
@@ -436,7 +780,9 @@ const runStep = (command, args, cwd, res) => {
             env.PATH = `${parts.join(':')}:${env.PATH}`;
         }
 
-        const proc = spawn(cmd, args, { cwd, shell: true, env });
+        // Quote command if it contains spaces (Windows shell issue)
+        const quotedCmd = cmd.includes(' ') ? `"${cmd}"` : cmd;
+        const proc = spawn(quotedCmd, args, { cwd, shell: true, env });
 
         proc.stdout.on('data', (data) => {
             const lines = data.toString().split('\n');
@@ -602,6 +948,16 @@ router.post('/create', async (req, res) => {
         } catch (e) {
             // ignore
         }
+    } else if (instanceType === 'nonebot') {
+        // Check for Python
+        const pythonBinDir = path.join(BIN_DIR, 'python-3.12.8-embed-amd64');
+        const hasPortablePython = fs.existsSync(path.join(pythonBinDir, 'python.exe'));
+        const hasPythonInPath = require('child_process').spawnSync('python', ['--version'], { shell: true }).status === 0;
+
+        if (!hasPortablePython && !hasPythonInPath) {
+            broadcastGlobalLog(`[ERR] Python not found. Please install Python first.`);
+            return res.status(400).json({ error: '未检测到 Python，请先安装 Python' });
+        }
     }
 
     const gitBinDir = path.join(BIN_DIR, 'PortableGit', 'cmd');
@@ -760,6 +1116,102 @@ router.post('/create', async (req, res) => {
 
             fs.writeFileSync(configJsonPath, JSON.stringify(configJson, null, 2));
             broadcastGlobalLog(`[SYSTEM] GSUID port configured: ${instancePort}`);
+        } else if (instanceType === 'nonebot') {
+            // NoneBot Steps - Manual creation with pyproject.toml for nb run compatibility
+            // Note: nb-cli's --non-interactive mode doesn't work without TTY (NoConsoleScreenBufferError)
+            broadcastGlobalLog(`[SYSTEM] Creating NoneBot project...`);
+
+            // 1. Create project directory
+            fs.mkdirSync(installPath, { recursive: true });
+            broadcastGlobalLog(`[SYSTEM] Created directory: ${installPath}`);
+
+            // 2. Create virtual environment
+            broadcastGlobalLog(`[SYSTEM] Creating Python virtual environment...`);
+            await runStep('python', ['-m', 'venv', '.venv', '--prompt', 'nonebot2'], installPath);
+
+            // 3. Install dependencies
+            const isWin = process.platform === 'win32';
+            const venvPython = path.join(installPath, '.venv', isWin ? 'Scripts' : 'bin', isWin ? 'python.exe' : 'python');
+
+            const packages = ['nonebot2[fastapi]', 'nonebot-adapter-onebot'];
+            broadcastGlobalLog(`[SYSTEM] Installing: ${packages.join(', ')}`);
+            await runStep(venvPython, ['-m', 'pip', 'install', ...packages], installPath);
+
+            // 4. Generate pyproject.toml (NEW FORMAT for nb run compatibility)
+            const pyprojectContent = `[project]
+name = "${instanceName}"
+version = "0.1.0"
+description = "A NoneBot2 Project"
+readme = "README.md"
+requires-python = ">=3.9, <4.0"
+dependencies = ["nonebot2>=2.4.4", "nonebot-adapter-onebot>=2.4.6"]
+
+[tool.nonebot]
+plugin_dirs = ["${instanceName}/plugins"]
+builtin_plugins = ["echo"]
+
+[tool.nonebot.plugins]
+
+[tool.nonebot.adapters]
+"@local" = []
+nonebot-adapter-onebot = [{name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11"}]
+`;
+            fs.writeFileSync(path.join(installPath, 'pyproject.toml'), pyprojectContent);
+            broadcastGlobalLog(`[SYSTEM] Generated pyproject.toml for nb run compatibility`);
+
+            // 5. Generate bot.py
+            const botPyContent = `import nonebot
+from nonebot.adapters.onebot.v11 import Adapter
+
+nonebot.init()
+driver = nonebot.get_driver()
+driver.register_adapter(Adapter)
+
+# Load plugins from pyproject.toml
+nonebot.load_from_toml("pyproject.toml")
+
+if __name__ == "__main__":
+    nonebot.run()
+`;
+            fs.writeFileSync(path.join(installPath, 'bot.py'), botPyContent);
+            broadcastGlobalLog(`[SYSTEM] Generated bot.py`);
+
+            // 6. Create .env configuration
+            const envContent = `# NoneBot 配置文件
+# 详细配置请参考: https://nonebot.dev/docs/appendices/config
+
+# ===== 基础配置 =====
+HOST=0.0.0.0
+PORT=${instancePort}
+LOG_LEVEL=INFO
+DEBUG=false
+
+# ===== 超级用户 (机器人主人的QQ号) =====
+# 格式: ["QQ号1", "QQ号2"]
+SUPERUSERS=[]
+
+# ===== 机器人昵称 =====
+NICKNAME=[]
+
+# ===== 命令配置 =====
+COMMAND_START=["/", "#"]
+COMMAND_SEP=["."]
+
+# ===== 驱动器 =====
+DRIVER=~fastapi
+
+# ===== 插件兼容性配置 =====
+LOCALSTORE_USE_CWD=True
+`;
+            fs.writeFileSync(path.join(installPath, '.env'), envContent);
+            broadcastGlobalLog(`[SYSTEM] Created .env with PORT=${instancePort}`);
+
+            // 7. Create plugins directory and README
+            const pluginsDir = path.join(installPath, instanceName, 'plugins');
+            fs.mkdirSync(pluginsDir, { recursive: true });
+            fs.writeFileSync(path.join(installPath, 'README.md'), `# ${instanceName}\n\nA NoneBot2 project created by Gravity Launcher.\n`);
+
+            broadcastGlobalLog(`[SYSTEM] NoneBot project created successfully!`);
         }
 
         // Register Instance
@@ -975,6 +1427,25 @@ router.post('/terminal/:id', (req, res) => {
     broadcastTerminalOutput(`========================================`);
     broadcastTerminalOutput(``);
 
+    // Auto-activate local environment based on instance type
+    setTimeout(() => {
+        if (instance.type === 'nonebot') {
+            // Activate Python venv for NoneBot
+            const venvActivate = path.join(instancePath, '.venv', 'Scripts', 'activate.bat');
+            if (fs.existsSync(venvActivate)) {
+                child.stdin.write(`"${venvActivate}"\n`);
+                broadcastTerminalOutput(`[SYSTEM] Activated Python virtual environment (.venv)`);
+            }
+        } else {
+            // For Yunzai/GSUID, add local Node.js to PATH if available
+            const localNodeDir = data.localDependencies?.nodejs?.path;
+            if (localNodeDir && fs.existsSync(localNodeDir)) {
+                child.stdin.write(`set PATH=${localNodeDir};%PATH%\n`);
+                broadcastTerminalOutput(`[SYSTEM] Added local Node.js to PATH`);
+            }
+        }
+    }, 300);
+
     child.stdout.on('data', (data) => {
         const lines = data.toString().split('\n');
         lines.forEach(line => {
@@ -1114,11 +1585,28 @@ router.post('/import', async (req, res) => {
         return res.status(400).json({ error: '路径不是文件夹' });
     }
     const hasPackageJson = fs.existsSync(path.join(importPath, 'package.json'));
-    // GSUID usually has gsuid_core folder or pyproject.toml
-    const hasGsuidCore = fs.existsSync(path.join(importPath, 'gsuid_core')) || fs.existsSync(path.join(importPath, 'pyproject.toml'));
 
-    if (!hasPackageJson && !hasGsuidCore) {
-        return res.status(400).json({ error: '无效实例: 缺少 package.json (Yunzai) 或 pyproject.toml/gsuid_core (GSUID)' });
+    // NoneBot recognition - check bot.py, .env, or pyproject.toml with [tool.nonebot]
+    let hasNoneBot = fs.existsSync(path.join(importPath, 'bot.py')) || fs.existsSync(path.join(importPath, '.env'));
+
+    // Also check if pyproject.toml contains NoneBot config
+    const pyprojectPath = path.join(importPath, 'pyproject.toml');
+    if (!hasNoneBot && fs.existsSync(pyprojectPath)) {
+        try {
+            const content = fs.readFileSync(pyprojectPath, 'utf8');
+            if (content.includes('[tool.nonebot]') || content.includes('nonebot')) {
+                hasNoneBot = true;
+            }
+        } catch (e) {
+            // Ignore read errors
+        }
+    }
+
+    // GSUID has gsuid_core folder (NOT just pyproject.toml, since NoneBot also has it)
+    const hasGsuidCore = fs.existsSync(path.join(importPath, 'gsuid_core'));
+
+    if (!hasPackageJson && !hasGsuidCore && !hasNoneBot) {
+        return res.status(400).json({ error: '无效实例: 缺少 package.json (Yunzai), gsuid_core (GSUID) 或 bot.py/.env/pyproject.toml (NoneBot)' });
     }
 
     // Check for duplicate name
@@ -1133,7 +1621,11 @@ router.post('/import', async (req, res) => {
         return res.status(400).json({ error: '该路径已导入过实例' });
     }
 
-    const instanceType = hasGsuidCore ? 'gsuid' : 'yunzai';
+    // Determine instance type - prioritize NoneBot check first since it's more specific
+    let instanceType = 'yunzai';
+    if (hasNoneBot) instanceType = 'nonebot';
+    else if (hasGsuidCore) instanceType = 'gsuid';
+
 
     let instancePort = port;
 
@@ -1157,6 +1649,24 @@ router.post('/import', async (req, res) => {
         } catch (e) {
             console.error('Failed to read GSUID config port:', e);
         }
+    } else if (instanceType === 'nonebot' && !instancePort) {
+        try {
+            const envFiles = ['.env.prod', '.env.dev', '.env'];
+            let envContent = '';
+            for (const file of envFiles) {
+                const envPath = path.join(importPath, file);
+                if (fs.existsSync(envPath)) {
+                    envContent = fs.readFileSync(envPath, 'utf8');
+                    break;
+                }
+            }
+            if (envContent) {
+                const portMatch = envContent.match(/^PORT\s*=\s*(\d+)/m);
+                if (portMatch) instancePort = portMatch[1];
+            }
+        } catch (e) {
+            console.error('Failed to read NoneBot config port during import:', e);
+        }
     }
 
     const newId = Date.now().toString();
@@ -1164,7 +1674,7 @@ router.post('/import', async (req, res) => {
         id: newId,
         name: name,
         path: importPath,
-        port: instancePort || (instanceType === 'gsuid' ? '8080' : '2536'),
+        port: instancePort || (instanceType === 'gsuid' ? '8080' : instanceType === 'nonebot' ? '8080' : '2536'),
         created: Date.now(),
         type: instanceType,
         isImported: true, // Mark as imported
@@ -1305,6 +1815,48 @@ router.post('/import', async (req, res) => {
                 broadcastLog(newId, `[SYSTEM] uv sync 失败 (Exit code: ${code})`);
             }
         });
+    } else if (instanceType === 'nonebot') {
+        const venvPython = path.join(importPath, '.venv', 'Scripts', 'python.exe');
+        const reqPath = path.join(importPath, 'requirements.txt');
+
+        if (!fs.existsSync(venvPython)) {
+            broadcastLog(newId, `[SYSTEM] 警告：未检测到虚拟环境 (.venv)。`);
+            broadcastLog(newId, `[SYSTEM] 请确保已在实例目录下创建虚拟环境，或使用“新建实例”重新配置。`);
+        } else {
+            broadcastLog(newId, `[SYSTEM] 检测到虚拟环境。`);
+            if (fs.existsSync(reqPath)) {
+                broadcastLog(newId, `[SYSTEM] 检测到 requirements.txt，正在通过虚拟环境安装/更新依赖...`);
+
+                const child = spawn(venvPython, ['-m', 'pip', 'install', '-r', 'requirements.txt'], {
+                    cwd: importPath,
+                    shell: true
+                });
+
+                child.stdout.on('data', (data) => {
+                    const lines = data.toString().split('\n');
+                    lines.forEach(line => {
+                        if (line.trim()) broadcastLog(newId, `[PIP] ${line.trim()}`);
+                    });
+                });
+
+                child.stderr.on('data', (data) => {
+                    const lines = data.toString().split('\n');
+                    lines.forEach(line => {
+                        if (line.trim()) broadcastLog(newId, `[PIP] ${line.trim()}`);
+                    });
+                });
+
+                child.on('close', (code) => {
+                    if (code === 0) {
+                        broadcastLog(newId, `[SYSTEM] NoneBot 依赖检查完成。`);
+                    } else {
+                        broadcastLog(newId, `[SYSTEM] NoneBot 依赖安装/更新失败 (Exit code: ${code})。`);
+                    }
+                });
+            } else {
+                broadcastLog(newId, `[SYSTEM] NoneBot 实例已导入，环境检查通过。`);
+            }
+        }
     }
 
     res.json({ success: true, instance: newInstance });
@@ -1380,21 +1932,49 @@ router.get('/config/:id', (req, res) => {
     let masterQQ = '';
 
     try {
-        // Read port from server.yaml
-        const serverPath = fs.existsSync(serverConfigPath) ? serverConfigPath : serverDefaultPath;
-        if (fs.existsSync(serverPath)) {
-            const serverContent = fs.readFileSync(serverPath, 'utf8');
-            const portMatch = serverContent.match(/^port:\s*(\d+)/m);
-            if (portMatch) port = portMatch[1];
-        }
+        if (instance.type === 'nonebot') {
+            // Priority: .env.prod > .env.dev > .env
+            const envFiles = ['.env.prod', '.env.dev', '.env'];
+            let envContent = '';
+            for (const file of envFiles) {
+                const envPath = path.join(instance.path, file);
+                if (fs.existsSync(envPath)) {
+                    envContent = fs.readFileSync(envPath, 'utf8');
+                    break;
+                }
+            }
 
-        // Read masterQQ from other.yaml
-        const otherPath = fs.existsSync(otherConfigPath) ? otherConfigPath : otherDefaultPath;
-        if (fs.existsSync(otherPath)) {
-            const otherContent = fs.readFileSync(otherPath, 'utf8');
-            // masterQQ is a list, find first numeric entry
-            const masterMatch = otherContent.match(/masterQQ:\s*\n\s*-\s*"?(\d+)"?/);
-            if (masterMatch) masterQQ = masterMatch[1];
+            if (envContent) {
+                // Parse PORT
+                const portMatch = envContent.match(/^PORT\s*=\s*(\d+)/m);
+                if (portMatch) port = portMatch[1];
+
+                // Parse SUPERUSERS (format: ["123", "456"] or similar)
+                const superMatch = envContent.match(/^SUPERUSERS\s*=\s*\[(.*?)\]/m);
+                if (superMatch) {
+                    const content = superMatch[1];
+                    // Extract digits from between quotes
+                    const users = content.match(/\d+/g);
+                    if (users) masterQQ = users.join(', ');
+                }
+            }
+        } else {
+            // Read port from server.yaml (Yunzai)
+            const serverPath = fs.existsSync(serverConfigPath) ? serverConfigPath : serverDefaultPath;
+            if (fs.existsSync(serverPath)) {
+                const serverContent = fs.readFileSync(serverPath, 'utf8');
+                const portMatch = serverContent.match(/^port:\s*(\d+)/m);
+                if (portMatch) port = portMatch[1];
+            }
+
+            // Read masterQQ from other.yaml (Yunzai)
+            const otherPath = fs.existsSync(otherConfigPath) ? otherConfigPath : otherDefaultPath;
+            if (fs.existsSync(otherPath)) {
+                const otherContent = fs.readFileSync(otherPath, 'utf8');
+                // masterQQ is a list, find first numeric entry
+                const masterMatch = otherContent.match(/masterQQ:\s*\n\s*-\s*"?(\d+)"?/);
+                if (masterMatch) masterQQ = masterMatch[1];
+            }
         }
 
         res.json({ port, masterQQ });
@@ -1416,6 +1996,56 @@ router.post('/config/:id', async (req, res) => {
     const serverDefaultPath = path.join(instance.path, 'config', 'default_config', 'server.yaml');
     const otherConfigPath = path.join(configDir, 'other.yaml');
     const otherDefaultPath = path.join(instance.path, 'config', 'default_config', 'other.yaml');
+
+    // Handle NoneBot Config
+    if (instance.type === 'nonebot') {
+        try {
+            const envFiles = ['.env.prod', '.env.dev', '.env'];
+            let targetEnv = '.env';
+            let envContent = '';
+            for (const file of envFiles) {
+                const envPath = path.join(instance.path, file);
+                if (fs.existsSync(envPath)) {
+                    targetEnv = file;
+                    envContent = fs.readFileSync(envPath, 'utf8');
+                    break;
+                }
+            }
+
+            if (!envContent && fs.existsSync(path.join(instance.path, '.env'))) {
+                envContent = fs.readFileSync(path.join(instance.path, '.env'), 'utf8');
+            }
+
+            let newContent = envContent || '';
+
+            if (port) {
+                if (newContent.match(/^PORT\s*=/m)) {
+                    newContent = newContent.replace(/^PORT\s*=\s*\d+/m, `PORT=${port}`);
+                } else {
+                    newContent += `\nPORT=${port}`;
+                }
+                instance.port = port;
+            }
+
+            if (masterQQ) {
+                // Convert "123, 456" to ["123", "456"]
+                const users = masterQQ.split(/[,，\s]+/).filter(u => u.trim()).map(u => `"${u.trim()}"`);
+                const superLine = `SUPERUSERS=[${users.join(', ')}]`;
+                if (newContent.match(/^SUPERUSERS\s*=/m)) {
+                    newContent = newContent.replace(/^SUPERUSERS\s*=.*$/m, superLine);
+                } else {
+                    newContent += `\n${superLine}`;
+                }
+            }
+
+            fs.writeFileSync(path.join(instance.path, targetEnv), newContent, 'utf8');
+            saveData(data);
+            return res.json({ success: true, message: 'NoneBot config updated' });
+        } catch (err) {
+            console.error('Failed to update NoneBot config:', err);
+            return res.status(500).json({ error: `Failed to update NoneBot config: ${err.message}` });
+        }
+    }
 
     // Handle GSUID Config
     if (instance.type === 'gsuid') {

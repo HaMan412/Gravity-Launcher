@@ -561,4 +561,118 @@ router.post('/uninstall/:name', (req, res) => {
     }
 });
 
+// ============ nb-cli (NoneBot CLI) APIs ============
+
+// Check nb-cli status
+router.get('/nbcli/status', async (req, res) => {
+    try {
+        const result = await new Promise((resolve) => {
+            exec('nb --version', { timeout: 5000 }, (err, stdout) => {
+                if (err) {
+                    return resolve({ installed: false, version: null });
+                }
+                const versionMatch = stdout.match(/(\d+\.\d+\.\d+)/);
+                resolve({
+                    installed: true,
+                    version: versionMatch ? versionMatch[1] : 'unknown'
+                });
+            });
+        });
+        res.json(result);
+    } catch (err) {
+        res.json({ installed: false, version: null, error: err.message });
+    }
+});
+
+// Install nb-cli via pipx
+router.post('/nbcli/install', async (req, res) => {
+    res.json({ message: 'nb-cli installation started' });
+
+    broadcastGlobalLog('[SYSTEM] Installing nb-cli via pipx...');
+    broadcastGlobalLog('[SYSTEM] Step 1: Ensuring pipx is installed...');
+
+    try {
+        // Step 1: Ensure pipx is installed
+        await new Promise((resolve, reject) => {
+            exec('python -m pip install --user pipx', { timeout: 120000 }, (err, stdout, stderr) => {
+                if (err) {
+                    broadcastGlobalLog(`[WARN] pipx install warning: ${stderr || err.message}`);
+                }
+                resolve();
+            });
+        });
+
+        // Step 2: Ensure pipx path
+        await new Promise((resolve, reject) => {
+            exec('python -m pipx ensurepath', { timeout: 30000 }, (err, stdout, stderr) => {
+                if (err) {
+                    broadcastGlobalLog(`[WARN] pipx ensurepath warning: ${stderr || err.message}`);
+                }
+                resolve();
+            });
+        });
+
+        broadcastGlobalLog('[SYSTEM] Step 2: Installing nb-cli...');
+
+        // Step 3: Install nb-cli
+        await new Promise((resolve, reject) => {
+            const child = spawn('python', ['-m', 'pipx', 'install', 'nb-cli'], {
+                shell: true,
+                env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+            });
+
+            child.stdout.on('data', (data) => {
+                const text = data.toString().trim();
+                if (text) broadcastGlobalLog(`[NB-CLI] ${text}`);
+            });
+
+            child.stderr.on('data', (data) => {
+                const text = data.toString().trim();
+                if (text) broadcastGlobalLog(`[NB-CLI] ${text}`);
+            });
+
+            child.on('close', (code) => {
+                if (code === 0) {
+                    resolve();
+                } else {
+                    reject(new Error(`pipx install nb-cli exited with code ${code}`));
+                }
+            });
+
+            child.on('error', reject);
+        });
+
+        broadcastGlobalLog('[SYSTEM] nb-cli installed successfully!');
+        broadcastGlobalLog('[SYSTEM] You may need to restart your terminal/launcher for the "nb" command to be available.');
+
+    } catch (err) {
+        broadcastGlobalLog(`[ERR] nb-cli installation failed: ${err.message}`);
+    }
+});
+
+// Uninstall nb-cli via pipx
+router.post('/nbcli/uninstall', async (req, res) => {
+    res.json({ message: 'nb-cli uninstallation started' });
+
+    broadcastGlobalLog('[SYSTEM] Uninstalling nb-cli via pipx...');
+
+    try {
+        await new Promise((resolve, reject) => {
+            exec('python -m pipx uninstall nb-cli', { timeout: 60000 }, (err, stdout, stderr) => {
+                if (err) {
+                    reject(new Error(stderr || err.message));
+                } else {
+                    resolve(stdout);
+                }
+            });
+        });
+
+        broadcastGlobalLog('[SYSTEM] nb-cli uninstalled successfully!');
+        res.json({ success: true });
+
+    } catch (err) {
+        broadcastGlobalLog(`[ERR] nb-cli uninstallation failed: ${err.message}`);
+    }
+});
+
 module.exports = router;

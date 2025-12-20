@@ -662,14 +662,34 @@ function runCommand(command, args, cwd, instanceId, options = {}) {
 
         // Quote arguments with spaces for Windows shell
         const safeArgs = isWin ? args.map(arg => {
-            if (arg.includes(' ') && !arg.startsWith('"') && !arg.endsWith('"')) {
+            if (typeof arg === 'string' && arg.includes(' ') && !arg.startsWith('"') && !arg.endsWith('"')) {
                 return `"${arg}"`;
             }
             return arg;
         }) : args;
 
+        // On Windows, we'll use shell: true to handle command execution.
+        // We'll avoid prepending 'chcp' string to avoid quoting issues that lead to exit code 1.
+        // Instead, we rely on PYTHONUTF8/PYTHONIOENCODING environment variables for tool output.
+        let finalCmd = cmd;
+        let finalArgs = safeArgs;
+
+        // CRITICAL FIX: When using shell: true on Windows with a quoted command path,
+        // we must pass the entire command line as a single string to spawn.
+        // Otherwise cmd.exe fails to parse the arguments correctly (exit code 1).
+        if (isWin) {
+            const fullCommandLine = `${cmd} ${safeArgs.join(' ')}`;
+            finalCmd = fullCommandLine;
+            finalArgs = [];
+        }
+
         // Prepare Environment with bundled tool paths
-        const env = { ...process.env, ...(options.env || {}) };
+        const env = {
+            ...process.env,
+            ...(options.env || {}),
+            PYTHONUTF8: '1',
+            PYTHONIOENCODING: 'utf-8'
+        };
         const gitBin = path.join(BIN_DIR, 'PortableGit', 'cmd');
         const nodeBin = path.join(BIN_DIR, 'node-v24.12.0-win-x64', 'node-v24.12.0-win-x64');
         const pythonBin = path.join(BIN_DIR, 'python-3.12.8-embed-amd64');
@@ -689,7 +709,8 @@ function runCommand(command, args, cwd, instanceId, options = {}) {
             env.PATH = `${gitBin}:${nodeBin}:${pythonBin}:${env.PATH}`;
         }
 
-        const child = spawn(cmd, safeArgs, { cwd, shell: isWin, env });
+        console.log(`[runCommand] Running: ${finalCmd} ${finalArgs.join(' ')}`);
+        const child = spawn(finalCmd, finalArgs, { cwd, shell: isWin, env });
 
         child.stdout.on('data', (data) => {
             const line = stripAnsi(data.toString().trim());
@@ -1022,6 +1043,491 @@ router.delete('/gsuid-uninstall/:instanceId', (req, res) => {
         console.error('[FATAL] GSUID Uninstall error:', err);
         res.status(500).json({ error: 'Internal server error: ' + err.message });
     }
+});
+
+// =============================================
+// NONEBOT Plugin Management
+// =============================================
+
+// NoneBot Plugin Store Cache (with file persistence)
+const NONEBOT_CACHE_FILE = path.resolve(__dirname, '../../server/nonebot-store-cache.json');
+let nonebotStoreCache = {
+    data: [],
+    timestamp: 0
+};
+
+// Load cache from file on startup
+try {
+    if (fs.existsSync(NONEBOT_CACHE_FILE)) {
+        const cached = JSON.parse(fs.readFileSync(NONEBOT_CACHE_FILE, 'utf8'));
+        if (cached.data && Array.isArray(cached.data)) {
+            nonebotStoreCache = cached;
+            console.log(`[NoneBot] Loaded ${cached.data.length} plugins from cache`);
+        }
+    }
+} catch (e) {
+    console.log('[NoneBot] No cache file found, will fetch on first access');
+}
+
+// Helper to save cache to file
+function saveNonebotStoreCache() {
+    try {
+        fs.writeFileSync(NONEBOT_CACHE_FILE, JSON.stringify(nonebotStoreCache), 'utf8');
+    } catch (e) {
+        console.error('[NoneBot] Failed to save cache:', e.message);
+    }
+}
+
+const NONEBOT_STORE_URL = 'https://registry.nonebot.dev/plugins.json';
+
+
+// PyPI Mirrors for China
+const PYPI_MIRRORS = [
+    { name: 'PyPI 官方', url: '' },
+    { name: '阿里云镜像', url: 'https://mirrors.aliyun.com/pypi/simple/' },
+    { name: '清华大学镜像', url: 'https://pypi.tuna.tsinghua.edu.cn/simple/' },
+    { name: '中科大镜像', url: 'https://pypi.mirrors.ustc.edu.cn/simple/' },
+    { name: '豆瓣镜像', url: 'https://pypi.doubanio.com/simple/' }
+];
+
+// Get PyPI mirrors list
+router.get('/pypi-mirrors', (req, res) => {
+    res.json(PYPI_MIRRORS);
+});
+
+// Get/Set PyPI mirror preference
+let selectedPypiMirror = '';
+
+router.get('/pypi-mirror', (req, res) => {
+    res.json({ mirror: selectedPypiMirror });
+});
+
+router.post('/pypi-mirror', (req, res) => {
+    const { mirror } = req.body;
+    selectedPypiMirror = mirror || '';
+    res.json({ success: true, mirror: selectedPypiMirror });
+});
+
+// Helper: Build pip install args with mirror
+function buildPipInstallArgs(packageName) {
+    const args = ['install', packageName];
+    if (selectedPypiMirror) {
+        args.push('-i', selectedPypiMirror, '--trusted-host', new URL(selectedPypiMirror).hostname);
+    }
+    return args;
+}
+
+// Get NoneBot Plugin Store
+router.get('/nonebot-store', async (req, res) => {
+    const { force } = req.query;
+
+    // Check Cache
+    if (!force && Date.now() - nonebotStoreCache.timestamp < CACHE_TTL && nonebotStoreCache.data.length > 0) {
+        return res.json(nonebotStoreCache.data);
+    }
+
+    try {
+        const response = await axios.get(NONEBOT_STORE_URL, { timeout: 15000 });
+        const plugins = response.data;
+
+        if (Array.isArray(plugins)) {
+            // Transform to our internal format
+            const transformed = plugins.map(p => ({
+                name: p.name || p.module_name,
+                description: p.desc || '',
+                author: p.author || '',
+                link: p.homepage || '',
+                version: p.version || '',
+                projectLink: p.project_link || '',
+                moduleName: p.module_name || '',
+                tags: p.tags || [],
+                isOfficial: p.is_official || false,
+                type: p.type || 'application',
+                valid: p.valid !== false,
+                supportedAdapters: p.supported_adapters || null,
+                time: p.time || ''
+            }));
+
+            nonebotStoreCache.data = transformed;
+            nonebotStoreCache.timestamp = Date.now();
+            saveNonebotStoreCache(); // Save to file for persistence
+            res.json(transformed);
+        } else {
+            res.status(500).json({ error: 'Invalid response from NoneBot registry' });
+        }
+    } catch (error) {
+        console.error('Failed to fetch NoneBot store:', error.message);
+        // Return cached data if available
+        if (nonebotStoreCache.data.length > 0) {
+            return res.json(nonebotStoreCache.data);
+        }
+        res.status(500).json({ error: 'Failed to fetch NoneBot plugin store' });
+    }
+});
+
+// Check if nb-cli is installed
+router.get('/nonebot-check-nbcli/:instanceId', async (req, res) => {
+    const { instanceId } = req.params;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === instanceId);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+
+    try {
+        // Run nb --version in instance directory
+        const result = await new Promise((resolve, reject) => {
+            const isWin = process.platform === 'win32';
+            const child = spawn('nb', ['--version'], {
+                cwd: instance.path,
+                shell: isWin,
+                env: { ...process.env }
+            });
+
+            let stdout = '';
+            let stderr = '';
+
+            child.stdout.on('data', (data) => { stdout += data.toString(); });
+            child.stderr.on('data', (data) => { stderr += data.toString(); });
+
+            child.on('error', (err) => {
+                resolve({ installed: false, error: err.message });
+            });
+
+            child.on('close', (code) => {
+                if (code === 0) {
+                    // Parse version from output like "nb-cli, version 1.4.2"
+                    const versionMatch = stdout.match(/version\s+([\d.]+)/i) || stderr.match(/version\s+([\d.]+)/i);
+                    resolve({
+                        installed: true,
+                        version: versionMatch ? versionMatch[1] : 'unknown'
+                    });
+                } else {
+                    resolve({ installed: false });
+                }
+            });
+        });
+
+        res.json(result);
+    } catch (error) {
+        res.json({ installed: false, error: error.message });
+    }
+});
+
+// Install nb-cli
+router.post('/nonebot-install-nbcli/:instanceId', async (req, res) => {
+    const { instanceId } = req.params;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === instanceId);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+
+    // Start async installation
+    (async () => {
+        try {
+            broadcastLog(instanceId, `--- [NoneBot] 开始安装 nb-cli ---`);
+            const pipArgs = buildPipInstallArgs('nb-cli');
+            await runCommand('pip', pipArgs, instance.path, instanceId);
+            broadcastLog(instanceId, `--- [NoneBot] nb-cli 安装成功 ---`);
+        } catch (err) {
+            broadcastLog(instanceId, `--- [NoneBot] nb-cli 安装失败: ${err.message} ---`);
+        }
+    })();
+
+    res.json({ status: 'processing', message: 'nb-cli installation started' });
+});
+
+// Get installed NoneBot plugins
+router.get('/nonebot-installed/:instanceId', async (req, res) => {
+    const { instanceId } = req.params;
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === instanceId);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+
+    const plugins = [];
+
+    try {
+        // Pre-load store cache if empty (needed for plugin descriptions)
+        if (nonebotStoreCache.data.length === 0) {
+            try {
+                const response = await axios.get(NONEBOT_STORE_URL, { timeout: 15000 });
+                if (Array.isArray(response.data)) {
+                    nonebotStoreCache.data = response.data.map(p => ({
+                        name: p.name || p.module_name,
+                        description: p.desc || '',
+                        author: p.author || '',
+                        link: p.homepage || '',
+                        version: p.version || '',
+                        projectLink: p.project_link || '',
+                        moduleName: p.module_name || '',
+                        tags: p.tags || [],
+                        isOfficial: p.is_official || false
+                    }));
+                    nonebotStoreCache.timestamp = Date.now();
+                    saveNonebotStoreCache(); // Save to file for persistence
+                }
+            } catch (storeErr) {
+                console.log('Failed to preload store cache:', storeErr.message);
+            }
+        }
+
+        // Method 1: Parse pyproject.toml for registered plugins
+
+        const pyprojectPath = path.join(instance.path, 'pyproject.toml');
+        let registeredPlugins = [];
+
+        if (fs.existsSync(pyprojectPath)) {
+            try {
+                const content = fs.readFileSync(pyprojectPath, 'utf8');
+                // Simple TOML parsing for plugins array
+                // Looking for: plugins = ["plugin1", "plugin2"]
+                const pluginsMatch = content.match(/plugins\s*=\s*\[([\s\S]*?)\]/);
+                if (pluginsMatch) {
+                    const pluginsStr = pluginsMatch[1];
+                    // Extract quoted strings
+                    const matches = pluginsStr.match(/"([^"]+)"/g) || [];
+                    registeredPlugins = matches.map(m => m.replace(/"/g, ''));
+                }
+            } catch (e) {
+                console.error('Error parsing pyproject.toml:', e.message);
+            }
+        }
+
+        // Method 2: Run pip list to get installed packages and versions
+        // FIX: Use python -m pip instead of pip.exe to avoid hardcoded path issues
+        const pipListResult = await new Promise((resolve) => {
+            const isWin = process.platform === 'win32';
+
+            // Try to use venv python if available
+            let pythonCmd = 'python';
+            const venvPython = isWin
+                ? path.join(instance.path, '.venv', 'Scripts', 'python.exe')
+                : path.join(instance.path, '.venv', 'bin', 'python');
+
+            if (fs.existsSync(venvPython)) {
+                pythonCmd = venvPython;
+            }
+
+            // Use python -m pip list instead of pip directly
+            const args = ['-m', 'pip', 'list', '--format=json'];
+
+            // On Windows with shell: true, we need to pass the full command as a single string
+            let finalCmd = pythonCmd;
+            let finalArgs = args;
+            if (isWin) {
+                // Quote python path if it contains spaces
+                const quotedPython = pythonCmd.includes(' ') ? `"${pythonCmd}"` : pythonCmd;
+                finalCmd = `${quotedPython} ${args.join(' ')}`;
+                finalArgs = [];
+            }
+
+            const child = spawn(finalCmd, finalArgs, {
+                cwd: instance.path,
+                shell: isWin,
+                env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+            });
+
+            let stdout = '';
+            child.stdout.on('data', (data) => { stdout += data.toString(); });
+            child.on('close', (code) => {
+                if (code === 0) {
+                    try {
+                        resolve(JSON.parse(stdout));
+                    } catch {
+                        resolve([]);
+                    }
+                } else {
+                    resolve([]);
+                }
+            });
+            child.on('error', () => resolve([]));
+        });
+
+        // Filter for nonebot plugins
+        const nonebotPackages = pipListResult.filter(pkg =>
+            pkg.name.startsWith('nonebot-plugin-') ||
+            pkg.name.startsWith('nonebot_plugin_')
+        );
+
+        // Merge with store data for descriptions
+        for (const pkg of nonebotPackages) {
+            // Convert package name to module name (nonebot-plugin-xxx -> nonebot_plugin_xxx)
+            const moduleName = pkg.name.replace(/-/g, '_');
+            const isRegistered = registeredPlugins.some(rp =>
+                rp === moduleName || rp === pkg.name
+            );
+
+            // Try to find in store cache for metadata
+            const storeMatch = nonebotStoreCache.data.find(sp =>
+                sp.projectLink === pkg.name ||
+                sp.moduleName === moduleName
+            );
+
+            plugins.push({
+                name: storeMatch?.name || pkg.name,
+                description: storeMatch?.description || '',
+                author: storeMatch?.author || '',
+                version: pkg.version,
+                projectLink: pkg.name,
+                moduleName: moduleName,
+                link: storeMatch?.link || `https://pypi.org/project/${pkg.name}`,
+                isRegistered: isRegistered,
+                tags: storeMatch?.tags || [],
+                isOfficial: storeMatch?.isOfficial || false
+            });
+        }
+
+        res.json(plugins);
+    } catch (error) {
+        console.error('Error getting NoneBot installed plugins:', error);
+        res.json([]);
+    }
+});
+
+// Install NoneBot Plugin (using nb-cli)
+router.post('/nonebot-install/:instanceId', async (req, res) => {
+    const { instanceId } = req.params;
+    const { projectLink, moduleName } = req.body;
+
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === instanceId);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+    if (!projectLink) return res.status(400).json({ error: 'Project link required' });
+
+    // Start async installation
+    (async () => {
+        try {
+            broadcastLog(instanceId, `--- [NoneBot] 开始安装插件: ${projectLink} ---`);
+
+            const isWin = process.platform === 'win32';
+            const venvPath = path.join(instance.path, '.venv');
+            const venvPython = isWin ? path.join(venvPath, 'Scripts', 'python.exe') : path.join(venvPath, 'bin', 'python');
+            const venvPip = isWin ? path.join(venvPath, 'Scripts', 'pip.exe') : path.join(venvPath, 'bin', 'pip');
+            const pyprojectPath = path.join(instance.path, 'pyproject.toml');
+            const botPyPath = path.join(instance.path, 'bot.py');
+
+            // 1. Determine installation method
+            let method = 'pip';
+            if (fs.existsSync(pyprojectPath)) {
+                try {
+                    // Check if nb-cli can run
+                    await runCommand('nb', ['--version'], instance.path, instanceId);
+                    method = 'nb';
+                } catch {
+                    method = 'pip';
+                }
+            }
+
+            if (method === 'nb') {
+                broadcastLog(instanceId, `[NoneBot] 检测到 pyproject.toml，使用 nb-cli 安装...`);
+                await runCommand('nb', ['plugin', 'install', projectLink], instance.path, instanceId);
+            } else {
+                broadcastLog(instanceId, `[NoneBot] 未检测到 pyproject.toml 或 nb-cli，使用 pip 模式安装...`);
+
+                // FIX: Use python -m pip instead of pip.exe directly
+                // pip.exe has hardcoded Python path that breaks when venv is moved
+                let pythonToUse = 'python';
+                const venvNames = ['.venv', 'venv'];
+                const scriptDir = isWin ? 'Scripts' : 'bin';
+                const pythonExe = isWin ? 'python.exe' : 'python';
+
+                for (const venvName of venvNames) {
+                    const checkPath = path.join(instance.path, venvName, scriptDir, pythonExe);
+                    if (fs.existsSync(checkPath)) {
+                        pythonToUse = checkPath;
+                        break;
+                    }
+                }
+
+                if (pythonToUse === 'python') {
+                    broadcastLog(instanceId, `[WARN] 未找到虚拟环境 (.venv 或 venv)，将尝试使用全局 Python...`);
+                } else {
+                    broadcastLog(instanceId, `[NoneBot] 使用环境中的 Python: ${pythonToUse}`);
+                }
+
+                // Build pip args: python -m pip install <package> [-i mirror]
+                const pipArgs = ['-m', 'pip', ...buildPipInstallArgs(projectLink)];
+
+                await runCommand(pythonToUse, pipArgs, instance.path, instanceId);
+
+                // 2. Auto-registration for bot.py
+                if (fs.existsSync(botPyPath)) {
+                    broadcastLog(instanceId, `[NoneBot] 检测到 bot.py，正在尝试自动注册插件...`);
+                    try {
+                        let content = fs.readFileSync(botPyPath, 'utf8');
+                        const loadPattern = new RegExp(`nonebot\\.load_plugin\\(['"]${moduleName}['"]\\)`, 'g');
+
+                        if (loadPattern.test(content)) {
+                            broadcastLog(instanceId, `[NoneBot] 插件 ${moduleName} 已在 bot.py 中加载，跳过注入。`);
+                        } else {
+                            // Find a good place to inject. Usually before if __name__ == "__main__":
+                            const injection = `\nnonebot.load_plugin("${moduleName}")\n`;
+                            if (content.includes('if __name__ == "__main__":')) {
+                                content = content.replace('if __name__ == "__main__":', injection + 'if __name__ == "__main__":');
+                            } else {
+                                content += injection;
+                            }
+                            fs.writeFileSync(botPyPath, content, 'utf8');
+                            broadcastLog(instanceId, `[NoneBot] ✓ 已成功向 bot.py 注入加载代码。`);
+                        }
+                    } catch (e) {
+                        broadcastLog(instanceId, `[WARN] 自动注册失败: ${e.message}。请手动在 bot.py 中添加 nonebot.load_plugin("${moduleName}")`);
+                    }
+                } else {
+                    broadcastLog(instanceId, `[NoneBot] 💡 提示: 请确保在您的入口文件中添加 nonebot.load_plugin("${moduleName}") 以启用插件。`);
+                }
+            }
+
+            broadcastLog(instanceId, `--- [NoneBot] 插件安装成功: ${projectLink} ---`);
+        } catch (err) {
+            broadcastLog(instanceId, `--- [NoneBot] 插件安装失败: ${err.message} ---`);
+        }
+    })();
+
+    res.json({ status: 'processing', message: 'Plugin installation started' });
+});
+
+// Uninstall NoneBot Plugin (using nb-cli)
+router.delete('/nonebot-uninstall/:instanceId', async (req, res) => {
+    const { instanceId } = req.params;
+    const { projectLink } = req.body;
+
+    const data = loadData();
+    const instance = data.instances.find(i => i.id === instanceId);
+
+    if (!instance) return res.status(404).json({ error: 'Instance not found' });
+    if (!projectLink) return res.status(400).json({ error: 'Project link required' });
+
+    // Start async uninstallation
+    (async () => {
+        try {
+            broadcastLog(instanceId, `--- [NoneBot] 开始卸载插件: ${projectLink} ---`);
+
+            // Use nb plugin uninstall for automatic config update
+            await runCommand('nb', ['plugin', 'uninstall', projectLink], instance.path, instanceId);
+
+            broadcastLog(instanceId, `--- [NoneBot] 插件卸载成功: ${projectLink} ---`);
+        } catch (err) {
+            broadcastLog(instanceId, `--- [NoneBot] nb-cli 卸载失败，尝试 pip 卸载... ---`);
+
+            // Fallback: Try python -m pip uninstall
+            try {
+                const isWin = process.platform === 'win32';
+                const venvPython = isWin
+                    ? path.join(instance.path, '.venv', 'Scripts', 'python.exe')
+                    : path.join(instance.path, '.venv', 'bin', 'python');
+
+                const pythonToUse = fs.existsSync(venvPython) ? venvPython : 'python';
+                await runCommand(pythonToUse, ['-m', 'pip', 'uninstall', '-y', projectLink], instance.path, instanceId);
+                broadcastLog(instanceId, `[NoneBot] pip 卸载成功，请手动从 pyproject.toml 中移除插件`);
+            } catch (pipErr) {
+                broadcastLog(instanceId, `[NoneBot] 卸载失败: ${pipErr.message}`);
+            }
+        }
+    })();
+
+    res.json({ status: 'processing', message: 'Plugin uninstallation started' });
 });
 
 module.exports = router;
