@@ -149,6 +149,11 @@ router.post('/start/:id', async (req, res) => {
     // 2. Prepare Environment - Simplified PATH building
     // Only add directories that actually exist
     const env = { ...process.env };
+
+    // UV environment variables for Python package management
+    env.UV_INDEX_URL = 'https://pypi.tuna.tsinghua.edu.cn/simple'; // Tsinghua mirror for faster downloads
+    env.UV_PYTHON_DOWNLOADS = 'never'; // Use local Python only
+
     let pathParts = [];
 
     // Use helpers to find directories
@@ -902,6 +907,9 @@ const runStep = (command, args, cwd, res) => {
 
         // Tell UV to use local Python, not download
         env.UV_PYTHON_DOWNLOADS = 'never';
+
+        // Use Tsinghua PyPI mirror for faster downloads in China
+        env.UV_INDEX_URL = 'https://pypi.tuna.tsinghua.edu.cn/simple';
 
         // Prepend to PATH
         if (isWin) {
