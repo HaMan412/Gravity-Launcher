@@ -4,11 +4,11 @@
 由谷歌反重力强力辅助
 
 ### 引用
-云崽：[Trss-Yunzai](https://github.com/TimeRainStarSky/Yunzai)
-GSUID：[Gsuid_Core](https://github.com/Genshin-bots/gsuid_core)
-NoneBot：[NoneBot](https://github.com/nonebot/nonebot2)
-AstrBot：[AstrBot](https://astrbot.app/)
-插件索引：[Yunzai-Bot-plugins-index](https://github.com/yhArcadia/Yunzai-Bot-plugins-index)
+- 云崽：[Trss-Yunzai](https://github.com/TimeRainStarSky/Yunzai)
+- GSUID：[Gsuid_Core](https://github.com/Genshin-bots/gsuid_core)
+- NoneBot：[NoneBot](https://github.com/nonebot/nonebot2)
+- AstrBot：[AstrBot](https://astrbot.app/)
+- 插件索引：[Yunzai-Bot-plugins-index](https://github.com/yhArcadia/Yunzai-Bot-plugins-index)
 
 ## Todo
 - [x] 支持Redis、SQLite操作
