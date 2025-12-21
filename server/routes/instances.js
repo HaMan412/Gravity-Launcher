@@ -284,6 +284,33 @@ router.post('/start/:id', async (req, res) => {
             }
         });
 
+    } else if (instanceType === 'astrbot') {
+        // AstrBot uses: uv run main.py (first run) or uv run --no-sync main.py (subsequent runs)
+        const mainPy = path.join(instance.path, 'main.py');
+        const venvPath = path.join(instance.path, '.venv');
+
+        if (!fs.existsSync(mainPy)) {
+            broadcastLog(id, `--- ERROR: main.py not found. Please check the instance. ---`);
+            return res.status(500).json({ error: 'main.py not found' });
+        }
+
+        // Check if .venv exists - if yes, use --no-sync to avoid re-syncing plugin dependencies
+        const hasVenv = fs.existsSync(venvPath);
+        const uvArgs = hasVenv ? ['run', '--no-sync', 'main.py'] : ['run', 'main.py'];
+
+        console.log(`Starting AstrBot with: uv ${uvArgs.join(' ')}`);
+        broadcastLog(id, `Starting AstrBot${hasVenv ? ' (--no-sync)' : ''}...`);
+
+        child = spawn('uv', uvArgs, {
+            cwd: instance.path,
+            env: {
+                ...env,
+                PYTHONUTF8: '1',
+                PYTHONIOENCODING: 'utf-8'
+            },
+            shell: true
+        });
+
     } else {
         // Yunzai-Bot uses: node app.js
         console.log(`Using Node.js: ${process.execPath}`);
@@ -734,9 +761,31 @@ router.put('/llonebot/connect', (req, res) => {
 
         // Build the connection URL based on instance type
         // NoneBot uses /onebot/v11/ws, Yunzai (TRSS) uses /OneBotv11
-        const url = instanceType === 'nonebot'
-            ? `ws://127.0.0.1:${port}/onebot/v11/ws`
-            : `ws://127.0.0.1:${port}/OneBotv11`;
+        // AstrBot uses aiocqhttp with reverse websocket on port 6199 (default)
+        let url;
+        if (instanceType === 'astrbot') {
+            // For AstrBot, we need to get the OneBot port from its config
+            const instance = data.instances.find(i => i.id === instanceId);
+            let onebotPort = 6199; // default
+            if (instance) {
+                const astrConfigPath = path.join(instance.path, 'data', 'cmd_config.json');
+                if (fs.existsSync(astrConfigPath)) {
+                    try {
+                        const astrConfig = JSON.parse(fs.readFileSync(astrConfigPath, 'utf8'));
+                        // Find aiocqhttp platform adapter
+                        const obAdapter = (astrConfig.platform || []).find(p => p.type === 'aiocqhttp');
+                        if (obAdapter && obAdapter.ws_reverse_port) {
+                            onebotPort = obAdapter.ws_reverse_port;
+                        }
+                    } catch (e) { /* use default */ }
+                }
+            }
+            url = `ws://127.0.0.1:${onebotPort}/ws`;
+        } else if (instanceType === 'nonebot') {
+            url = `ws://127.0.0.1:${port}/onebot/v11/ws`;
+        } else {
+            url = `ws://127.0.0.1:${port}/OneBotv11`;
+        }
 
         const adapterName = `Gravity-${instanceName}`;
         let status = 'created';
@@ -788,6 +837,46 @@ router.put('/llonebot/connect', (req, res) => {
         if (status !== 'exists') {
             fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
             broadcastGlobalLog(`[SYSTEM] LLOneBot configured to connect to ${instanceName} (${url})`);
+        }
+
+        // For AstrBot, also configure the AstrBot side (enable aiocqhttp adapter)
+        if (instanceType === 'astrbot' && status !== 'exists') {
+            const instance = data.instances.find(i => i.id === instanceId);
+            if (instance) {
+                const astrConfigPath = path.join(instance.path, 'data', 'cmd_config.json');
+                try {
+                    let astrConfig = {};
+                    if (fs.existsSync(astrConfigPath)) {
+                        astrConfig = JSON.parse(fs.readFileSync(astrConfigPath, 'utf8'));
+                    }
+
+                    // Ensure platform array exists
+                    if (!astrConfig.platform) astrConfig.platform = [];
+
+                    // Find or create aiocqhttp adapter
+                    let obAdapter = astrConfig.platform.find(p => p.type === 'aiocqhttp');
+                    if (!obAdapter) {
+                        obAdapter = {
+                            id: 'llonebot',
+                            type: 'aiocqhttp',
+                            enable: true,
+                            ws_reverse_host: '0.0.0.0',
+                            ws_reverse_port: 6199,
+                            ws_reverse_token: ''
+                        };
+                        astrConfig.platform.push(obAdapter);
+                        broadcastGlobalLog(`[SYSTEM] Created AstrBot OneBot adapter`);
+                    } else {
+                        // Ensure it's enabled
+                        obAdapter.enable = true;
+                        broadcastGlobalLog(`[SYSTEM] Enabled AstrBot OneBot adapter`);
+                    }
+
+                    fs.writeFileSync(astrConfigPath, JSON.stringify(astrConfig, null, 2));
+                } catch (e) {
+                    console.error('Failed to update AstrBot config for OneBot:', e);
+                }
+            }
         }
 
         res.json({ success: true, url, adapterName, status });
@@ -953,11 +1042,12 @@ router.get('/checkName/:name', (req, res) => {
 
 
 router.post('/create', async (req, res) => {
-    const { name, port, type, gsuidRepoSource } = req.body;
+    const { name, port, type, gsuidRepoSource, adapterPort } = req.body;
     const instanceName = name || 'Yunzai-Bot';
     const instancePort = port || '2536';
     const instanceType = type || 'yunzai';
     const gsuidRepo = gsuidRepoSource || 'gitee'; // default to gitee
+    const astrAdapterPort = adapterPort || '6199'; // default AstrBot adapter port
 
     // === Validate instance name format ===
     const validNamePattern = /^[a-zA-Z0-9_-]+$/;
@@ -999,6 +1089,16 @@ router.post('/create', async (req, res) => {
         if (!hasPortablePython && !hasPythonInPath) {
             broadcastGlobalLog(`[ERR] Python not found. Please install Python first.`);
             return res.status(400).json({ error: '未检测到 Python，请先安装 Python' });
+        }
+    } else if (instanceType === 'astrbot') {
+        // Check for UV (required for AstrBot)
+        const uvExe = getUvPath();
+        const hasPortableUv = uvExe !== 'uv' && fs.existsSync(uvExe);
+        const hasSystemUv = require('child_process').spawnSync('uv', ['--version'], { shell: true }).status === 0;
+
+        if (!hasPortableUv && !hasSystemUv) {
+            broadcastGlobalLog(`[ERR] 'uv' command not found. Please install UV in Environment Management.`);
+            return res.status(400).json({ error: '未检测到 uv 命令，请在环境管理中安装 UV' });
         }
     }
 
@@ -1250,6 +1350,49 @@ LOCALSTORE_USE_CWD=True
             fs.writeFileSync(path.join(installPath, 'README.md'), `# ${instanceName}\n\nA NoneBot2 project created by Gravity Launcher.\n`);
 
             broadcastGlobalLog(`[SYSTEM] NoneBot project created successfully!`);
+        } else if (instanceType === 'astrbot') {
+            // AstrBot Steps
+            broadcastGlobalLog(`[SYSTEM] Creating AstrBot project...`);
+
+            // 1. Git Clone from Gitee
+            await runStep('git', ['clone', '--depth', '1', 'https://gitee.com/hamann/AstrBot.git', `"${installPath}"`], process.cwd());
+
+            // 2. UV Sync - install dependencies
+            broadcastGlobalLog(`[SYSTEM] Installing AstrBot dependencies (uv sync)...`);
+            const localPython = getPythonPath();
+            broadcastGlobalLog(`[SYSTEM] Using Python: ${localPython}`);
+            await runStep('uv', ['sync', '--python', localPython], installPath);
+
+            // 3. Configure AstrBot (data/cmd_config.json)
+            broadcastGlobalLog(`[SYSTEM] Configuring AstrBot...`);
+            const astrConfigDir = path.join(installPath, 'data');
+            const astrConfigPath = path.join(astrConfigDir, 'cmd_config.json');
+            fs.mkdirSync(astrConfigDir, { recursive: true });
+
+            // Create initial config with dashboard port and OneBot adapter
+            const astrConfig = {
+                dashboard: {
+                    enable: true,
+                    username: 'astrbot',
+                    password: '77b90590a8945a7d36c963981a307dc9', // Default: astrbot
+                    host: '0.0.0.0',
+                    port: parseInt(instancePort)
+                },
+                platform: [
+                    {
+                        id: 'llonebot',
+                        type: 'aiocqhttp',
+                        enable: true,
+                        ws_reverse_host: '0.0.0.0',
+                        ws_reverse_port: parseInt(astrAdapterPort),
+                        ws_reverse_token: ''
+                    }
+                ]
+            };
+            fs.writeFileSync(astrConfigPath, JSON.stringify(astrConfig, null, 2));
+            broadcastGlobalLog(`[SYSTEM] AstrBot configured: Dashboard port=${instancePort}, OneBot port=${astrAdapterPort}`);
+
+            broadcastGlobalLog(`[SYSTEM] AstrBot project created successfully!`);
         }
 
         // Register Instance
@@ -1260,7 +1403,8 @@ LOCALSTORE_USE_CWD=True
             port: instancePort,
             redis: { mode: 'shared', port: 6379 },
             created: true,
-            type: instanceType
+            type: instanceType,
+            ...(instanceType === 'astrbot' ? { adapterPort: astrAdapterPort } : {})
         };
 
         if (fs.existsSync(DATA_FILE)) {
@@ -1295,9 +1439,41 @@ router.post('/delete', async (req, res) => {
     const instance = currentData.instances[instanceIndex];
 
     try {
+        // Stop instance if running
+        if (runningProcesses[id]) {
+            const child = runningProcesses[id];
+            broadcastGlobalLog(`[SYSTEM] Stopping instance '${instance.name}' before deletion...`);
+
+            if (process.platform === 'win32') {
+                const { exec } = require('child_process');
+                await new Promise(resolve => {
+                    exec(`taskkill /PID ${child.pid} /T /F`, () => {
+                        resolve();
+                    });
+                });
+            } else {
+                child.kill('SIGKILL');
+            }
+            delete runningProcesses[id];
+            broadcastStatus(id, 'stopped');
+            // Wait a bit for file locks to release
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
         // Remove directory
         if (fs.existsSync(instance.path)) {
-            fs.rmSync(instance.path, { recursive: true, force: true });
+            try {
+                fs.rmSync(instance.path, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+            } catch (e) {
+                // Fallback to shell command on Windows if EPERM/EBUSY
+                if (process.platform === 'win32') {
+                    broadcastGlobalLog(`[WARN] Standard delete failed, trying force delete...`);
+                    const { execSync } = require('child_process');
+                    execSync(`rmdir /s /q "${instance.path}"`);
+                } else {
+                    throw e;
+                }
+            }
         }
 
         // Remove from DB
@@ -1643,8 +1819,13 @@ router.post('/import', async (req, res) => {
     // GSUID has gsuid_core folder (NOT just pyproject.toml, since NoneBot also has it)
     const hasGsuidCore = fs.existsSync(path.join(importPath, 'gsuid_core'));
 
-    if (!hasPackageJson && !hasGsuidCore && !hasNoneBot) {
-        return res.status(400).json({ error: '无效实例: 缺少 package.json (Yunzai), gsuid_core (GSUID) 或 bot.py/.env/pyproject.toml (NoneBot)' });
+    // AstrBot has main.py + astrbot folder (NOT NoneBot - which also can have main.py sometimes)
+    const hasAstrBot = fs.existsSync(path.join(importPath, 'main.py')) &&
+        fs.existsSync(path.join(importPath, 'astrbot')) &&
+        !hasNoneBot;
+
+    if (!hasPackageJson && !hasGsuidCore && !hasNoneBot && !hasAstrBot) {
+        return res.status(400).json({ error: '无效实例: 缺少 package.json (Yunzai), gsuid_core (GSUID), bot.py (NoneBot) 或 main.py+astrbot (AstrBot)' });
     }
 
     // Check for duplicate name
@@ -1659,10 +1840,11 @@ router.post('/import', async (req, res) => {
         return res.status(400).json({ error: '该路径已导入过实例' });
     }
 
-    // Determine instance type - prioritize NoneBot check first since it's more specific
+    // Determine instance type - prioritize specific checks first
     let instanceType = 'yunzai';
     if (hasNoneBot) instanceType = 'nonebot';
     else if (hasGsuidCore) instanceType = 'gsuid';
+    else if (hasAstrBot) instanceType = 'astrbot';
 
 
     let instancePort = port;
@@ -1705,6 +1887,18 @@ router.post('/import', async (req, res) => {
         } catch (e) {
             console.error('Failed to read NoneBot config port during import:', e);
         }
+    } else if (instanceType === 'astrbot' && !instancePort) {
+        try {
+            const configPath = path.join(importPath, 'data', 'cmd_config.json');
+            if (fs.existsSync(configPath)) {
+                const configContent = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                if (configContent.dashboard?.port) {
+                    instancePort = configContent.dashboard.port.toString();
+                }
+            }
+        } catch (e) {
+            console.error('Failed to read AstrBot config port during import:', e);
+        }
     }
 
     const newId = Date.now().toString();
@@ -1712,7 +1906,7 @@ router.post('/import', async (req, res) => {
         id: newId,
         name: name,
         path: importPath,
-        port: instancePort || (instanceType === 'gsuid' ? '8080' : instanceType === 'nonebot' ? '8080' : '2536'),
+        port: instancePort || (instanceType === 'gsuid' ? '8080' : instanceType === 'nonebot' ? '8080' : instanceType === 'astrbot' ? '6185' : '2536'),
         created: Date.now(),
         type: instanceType,
         isImported: true, // Mark as imported
@@ -1895,6 +2089,55 @@ router.post('/import', async (req, res) => {
                 broadcastLog(newId, `[SYSTEM] NoneBot 实例已导入，环境检查通过。`);
             }
         }
+    } else if (instanceType === 'astrbot') {
+        // AstrBot: Run uv sync to ensure dependencies
+        broadcastLog(newId, `[SYSTEM] 正在安装 AstrBot 依赖... (uv sync)`);
+
+        const isWin = process.platform === 'win32';
+        const binDir = path.resolve(__dirname, '../../bin');
+        const env = { ...process.env, CI: 'true', PYTHONUTF8: '1' };
+        const uvBinDir = path.join(binDir, 'uv-x86_64-pc-windows-msvc');
+
+        if (isWin) {
+            let pathKey = 'PATH';
+            for (const key in env) {
+                if (key.toUpperCase() === 'PATH') {
+                    pathKey = key;
+                    break;
+                }
+            }
+            if (fs.existsSync(uvBinDir)) {
+                env[pathKey] = `${uvBinDir};${env[pathKey]}`;
+            }
+        }
+
+        const child = spawn('uv', ['sync'], {
+            cwd: importPath,
+            env: env,
+            shell: true
+        });
+
+        child.stdout.on('data', (data) => {
+            const lines = data.toString().split('\n');
+            lines.forEach(line => {
+                if (line.trim()) broadcastLog(newId, `[UV] ${line.trim()}`);
+            });
+        });
+
+        child.stderr.on('data', (data) => {
+            const lines = data.toString().split('\n');
+            lines.forEach(line => {
+                if (line.trim()) broadcastLog(newId, `[UV] ${line.trim()}`);
+            });
+        });
+
+        child.on('close', (code) => {
+            if (code === 0) {
+                broadcastLog(newId, `[SYSTEM] AstrBot 依赖安装完成。`);
+            } else {
+                broadcastLog(newId, `[SYSTEM] AstrBot 依赖安装失败 (Exit code: ${code})。`);
+            }
+        });
     }
 
     res.json({ success: true, instance: newInstance });
@@ -1996,6 +2239,17 @@ router.get('/config/:id', (req, res) => {
                     if (users) masterQQ = users.join(', ');
                 }
             }
+        } else if (instance.type === 'astrbot') {
+            // AstrBot: Read from data/cmd_config.json
+            const configPath = path.join(instance.path, 'data', 'cmd_config.json');
+            if (fs.existsSync(configPath)) {
+                const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                port = config.dashboard?.port?.toString() || '6185';
+                // AstrBot uses admins_id for admin list
+                if (config.admins_id && Array.isArray(config.admins_id)) {
+                    masterQQ = config.admins_id.filter(id => id !== 'astrbot').join(', ');
+                }
+            }
         } else {
             // Read port from server.yaml (Yunzai)
             const serverPath = fs.existsSync(serverConfigPath) ? serverConfigPath : serverDefaultPath;
@@ -2082,6 +2336,52 @@ router.post('/config/:id', async (req, res) => {
         } catch (err) {
             console.error('Failed to update NoneBot config:', err);
             return res.status(500).json({ error: `Failed to update NoneBot config: ${err.message}` });
+        }
+    }
+
+    // Handle AstrBot Config
+    if (instance.type === 'astrbot') {
+        const { adapterPort } = req.body;
+        try {
+            const configPath = path.join(instance.path, 'data', 'cmd_config.json');
+            let config = {};
+
+            if (fs.existsSync(configPath)) {
+                config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            }
+
+            if (port) {
+                if (!config.dashboard) config.dashboard = {};
+                config.dashboard.port = parseInt(port);
+                instance.port = port;
+            }
+
+            // Update adapter port
+            if (adapterPort) {
+                instance.adapterPort = adapterPort;
+                // Also update cmd_config.json aiocqhttp platform
+                if (Array.isArray(config.platform)) {
+                    const aiocqhttp = config.platform.find(p => p.type === 'aiocqhttp');
+                    if (aiocqhttp) {
+                        aiocqhttp.ws_reverse_port = parseInt(adapterPort);
+                    }
+                }
+            }
+
+            if (masterQQ) {
+                // Convert "123, 456" to ["123", "456"]
+                const admins = masterQQ.split(/[,，\s]+/).filter(u => u.trim());
+                // Always include 'astrbot' as default admin
+                if (!admins.includes('astrbot')) admins.unshift('astrbot');
+                config.admins_id = admins;
+            }
+
+            fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+            saveData(data);
+            return res.json({ success: true, message: 'AstrBot config updated' });
+        } catch (err) {
+            console.error('Failed to update AstrBot config:', err);
+            return res.status(500).json({ error: `Failed to update AstrBot config: ${err.message}` });
         }
     }
 

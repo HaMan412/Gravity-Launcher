@@ -29,6 +29,7 @@ app.use('/api/settings', require('./routes/settings'));
 app.use('/api/plugins', require('./routes/plugins'));
 app.use('/api/system', systemRoutes);
 app.use('/api/gsuid-adapter', require('./routes/gsuid-adapter'));
+app.use('/api/databases', require('./routes/databases'));
 
 // Connect broadcastGlobalLog to system routes
 setBroadcastGlobalLog(broadcastGlobalLog);
